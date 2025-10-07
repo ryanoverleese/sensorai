@@ -1,7 +1,2 @@
-/* 
-  # Allow your site(s) to embed this page in an <iframe>
-  # Include both apex and www.
+/*
   Content-Security-Policy: frame-ancestors https://acreinsights.com https://www.acreinsights.com https://*.wixsite.com https://*.editorx.io https://*.wix.com https://*.wixapps.net https://*.wixstatic.com 'self'
-
-  # IMPORTANT: remove/omit X-Frame-Options (SAMEORIGIN/deny) – CSP above replaces it
-  X-Frame-Options:
