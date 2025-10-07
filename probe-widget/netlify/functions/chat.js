@@ -23,12 +23,23 @@ function openaiHeaders() {
 async function getProbeData(args) {
   // Hardcode the logger ID if not provided
   const loggerId = args.loggerId || "25x4gcityw";
-  const { start, end } = args;
+  let { start, end } = args;
   const key = process.env.PROBE_API_KEY;
 
   if (!key) {
     console.error("[tool:get_probe_data] Missing PROBE_API_KEY");
     return { error: "Missing API credentials" };
+  }
+
+  // If no date range specified, get last 7 days to avoid huge datasets
+  if (!start && !end) {
+    const now = new Date();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    
+    // Format as YYYYMMDDHHMMSS
+    start = sevenDaysAgo.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    end = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    console.log("[tool:get_probe_data] Auto date range:", start, "to", end);
   }
 
   // Build URL with query parameters per Sentek API docs
@@ -55,13 +66,57 @@ async function getProbeData(args) {
   // The API returns CSV, not JSON
   const csvData = await res.text();
   console.log("[tool:get_probe_data] success, received", csvData.length, "characters");
-  console.log("[tool:get_probe_data] first 500 chars:", csvData.slice(0, 500));
   
-  return { 
-    format: "csv",
-    data: csvData,
-    loggerId: loggerId
+  // Parse CSV and extract meaningful summary
+  const lines = csvData.split('\n').filter(line => line.trim());
+  const headers = lines[0];
+  const dataLines = lines.slice(1);
+  
+  console.log("[tool:get_probe_data] parsed", dataLines.length, "data rows");
+  
+  // Get latest reading (last line)
+  const latestLine = dataLines[dataLines.length - 1];
+  const latestValues = latestLine.split(',');
+  
+  // Get first reading for comparison
+  const firstLine = dataLines[0];
+  const firstValues = firstLine.split(',');
+  
+  // Build a summary object with latest temperatures and moisture
+  const headerArray = headers.split(',');
+  const summary = {
+    loggerId: loggerId,
+    dateRange: {
+      start: firstValues[0],
+      end: latestValues[0]
+    },
+    totalReadings: dataLines.length,
+    latestReading: {},
+    headers: headerArray
   };
+  
+  // Extract temperature (T) and moisture readings from latest
+  headerArray.forEach((header, index) => {
+    if (header.includes('T') || header.includes('A') || header.includes('S')) {
+      summary.latestReading[header] = latestValues[index];
+    }
+  });
+  
+  // Include last 10 readings if dataset is small enough
+  if (dataLines.length <= 100) {
+    summary.recentReadings = dataLines.slice(-10).map(line => {
+      const values = line.split(',');
+      const reading = {};
+      headerArray.forEach((h, i) => {
+        reading[h] = values[i];
+      });
+      return reading;
+    });
+  }
+  
+  console.log("[tool:get_probe_data] summary size:", JSON.stringify(summary).length);
+  
+  return summary;
 }
 
 // ---- Main Handler ----
