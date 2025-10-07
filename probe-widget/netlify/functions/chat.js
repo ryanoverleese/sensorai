@@ -179,16 +179,41 @@ exports.handler = async (event) => {
   const msgRes = await fetch(`${openaiBase}/threads/${thread_id}/messages`, {
     headers: openaiHeaders(),
   });
+  
+  if (!msgRes.ok) {
+    const details = await safeJson(msgRes);
+    console.error("[messages] fetch FAILED:", msgRes.status, details);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: "Failed to fetch messages", details }),
+    };
+  }
+  
   const messages = await msgRes.json();
+  console.log("[messages] full response:", JSON.stringify(messages, null, 2));
 
   const latest = messages?.data?.[0]?.content?.[0]?.text?.value || "(no reply)";
   console.log("[messages] latest text:", latest.slice(0, 200));
+  
+  // Check the final run status
+  console.log("[runs] final status:", run.status);
+  if (run.status === "failed") {
+    console.error("[runs] failed with error:", run.last_error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ 
+        error: "Assistant run failed", 
+        details: run.last_error 
+      }),
+    };
+  }
 
   return {
     statusCode: 200,
     body: JSON.stringify({
       threadId: thread_id,
       response: latest,
+      runStatus: run.status,
     }),
   };
 };
