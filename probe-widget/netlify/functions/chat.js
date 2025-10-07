@@ -69,6 +69,16 @@ async function getProbeData(args) {
   
   // Parse CSV and extract meaningful summary
   const lines = csvData.split('\n').filter(line => line.trim());
+  
+  if (lines.length < 2) {
+    console.log("[tool:get_probe_data] no data found for date range");
+    return {
+      loggerId: loggerId,
+      error: "No data found for the specified date range",
+      dateRange: { start, end }
+    };
+  }
+  
   const headers = lines[0];
   const dataLines = lines.slice(1);
   
