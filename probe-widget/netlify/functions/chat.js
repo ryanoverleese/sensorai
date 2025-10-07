@@ -86,13 +86,13 @@ async function getProbeData(args) {
   
   // Get latest reading (last line)
   const latestLine = dataLines[dataLines.length - 1];
-  const latestValues = latestLine.split(',');
+  const latestValues = latestLine ? latestLine.split(',') : [];
   
   // Get first reading for comparison
   const firstLine = dataLines[0];
-  const firstValues = firstLine.split(',');
+  const firstValues = firstLine ? firstLine.split(',') : [];
   
-  // Build a summary object with latest temperatures and moisture
+  // Build a summary with DAILY averages for analysis
   const headerArray = headers.split(',');
   const summary = {
     loggerId: loggerId,
@@ -102,7 +102,7 @@ async function getProbeData(args) {
     },
     totalReadings: dataLines.length,
     latestReading: {},
-    headers: headerArray
+    dailySummary: []
   };
   
   // Extract temperature (T) and moisture readings from latest
@@ -112,18 +112,64 @@ async function getProbeData(args) {
     }
   });
   
-  // Include last 10 readings if dataset is small enough
-  if (dataLines.length <= 100) {
-    summary.recentReadings = dataLines.slice(-10).map(line => {
-      const values = line.split(',');
-      const reading = {};
-      headerArray.forEach((h, i) => {
-        reading[h] = values[i];
-      });
-      return reading;
+  // Group by date and calculate daily averages
+  const dailyData = {};
+  dataLines.forEach(line => {
+    const values = line.split(',');
+    const dateTime = values[0];
+    const date = dateTime ? dateTime.split(' ')[0] : null; // Get just the date part
+    
+    if (!date) return;
+    
+    if (!dailyData[date]) {
+      dailyData[date] = { count: 0, moistureSum: {}, tempSum: {} };
+    }
+    
+    // Sum up moisture and temperature values for averaging
+    headerArray.forEach((header, i) => {
+      const val = parseFloat(values[i]);
+      if (!isNaN(val)) {
+        if (header.includes('A')) { // Moisture sensors
+          if (!dailyData[date].moistureSum[header]) {
+            dailyData[date].moistureSum[header] = 0;
+          }
+          dailyData[date].moistureSum[header] += val;
+        }
+        if (header.includes('T')) { // Temperature sensors
+          if (!dailyData[date].tempSum[header]) {
+            dailyData[date].tempSum[header] = 0;
+          }
+          dailyData[date].tempSum[header] += val;
+        }
+      }
     });
-  }
+    dailyData[date].count++;
+  });
   
+  // Calculate averages and sort by date
+  const dates = Object.keys(dailyData).sort();
+  dates.forEach(date => {
+    const dayData = { 
+      date, 
+      avgMoisture: {}, 
+      avgTemp: {},
+      readingCount: dailyData[date].count
+    };
+    
+    // Calculate moisture averages
+    Object.keys(dailyData[date].moistureSum).forEach(sensor => {
+      dayData.avgMoisture[sensor] = (dailyData[date].moistureSum[sensor] / dailyData[date].count).toFixed(2);
+    });
+    
+    // Calculate temp averages
+    Object.keys(dailyData[date].tempSum).forEach(sensor => {
+      dayData.avgTemp[sensor] = (dailyData[date].tempSum[sensor] / dailyData[date].count).toFixed(2);
+    });
+    
+    summary.dailySummary.push(dayData);
+  });
+  
+  console.log("[tool:get_probe_data] created", summary.dailySummary.length, "daily summaries");
   console.log("[tool:get_probe_data] summary size:", JSON.stringify(summary).length);
   
   return summary;
