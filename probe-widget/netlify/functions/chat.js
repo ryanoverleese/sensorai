@@ -21,7 +21,9 @@ function openaiHeaders() {
 
 // ---- Tool Function ----
 async function getProbeData(args) {
-  const { loggerId, start, end } = args;
+  // Hardcode the logger ID if not provided
+  const loggerId = args.loggerId || "25x4gcityw";
+  const { start, end } = args;
   const base = process.env.PROBE_API_BASE;
   const key = process.env.PROBE_API_KEY;
 
