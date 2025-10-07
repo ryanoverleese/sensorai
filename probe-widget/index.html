@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Acre Insights • Probe Assistant</title>
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto; background:#f7f7f8; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 16px; }
+    .card { background:#fff; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.06); padding:16px; }
+    .header { display:flex; gap:12px; align-items:center; margin-bottom:8px; }
+    .dot { width:10px; height:10px; border-radius:50%; background:#0ea5e9; }
+    .title { font-weight:700; font-size:18px; }
+    #log { max-height: 65vh; overflow:auto; padding:8px 0; }
+    .bubble { padding:10px 12px; border-radius:12px; margin:8px 0; line-height:1.4; }
+    .user { background:#e6f2fe; align-self:flex-end; }
+    .assistant { background:#f2f2f3; }
+    .row { display:flex; gap:8px; }
+    .row input { flex:1; padding:12px; border-radius:12px; border:1px solid #e5e7eb; }
+    .row button { padding:12px 16px; border:0; border-radius:12px; background:#0ea5e9; color:#fff; font-weight:600; cursor:pointer; }
+    .row button:disabled { opacity:.6; cursor:not-allowed; }
+    .footer { color:#6b7280; font-size:12px; margin-top:8px; text-align:center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="header"><div class="dot"></div><div class="title">Probe Assistant</div></div>
+      <div id="log" class="column"></div>
+      <div class="row">
+        <input id="msg" type="text" placeholder="Ask about a logger, date range, depths, etc." />
+        <button id="send">Send</button>
+      </div>
+      <div class="footer">Powered by Acre Insights</div>
+    </div>
+  </div>
+
+  <script>
+    const log = document.getElementById('log');
+    const input = document.getElementById('msg');
+    const btn = document.getElementById('send');
+    let threadId = null;
+
+    function add(role, text) {
+      const div = document.createElement('div');
+      div.className = `bubble ${role}`;
+      div.innerHTML = (text || '').replace(/\n/g, '<br/>');
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function send() {
+      const text = input.value.trim();
+      if (!text) return;
+      add('user', text);
+      input.value = '';
+      btn.disabled = true;
+
+      try {
+        const r = await fetch('/.netlify/functions/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, threadId })
+        });
+        const data = await r.json();
+        threadId = data.threadId || threadId;
+        add('assistant', data.text || '(no reply)');
+      } catch (e) {
+        add('assistant', 'Error contacting assistant.');
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    btn.addEventListener('click', send);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') send();
+    });
+  </script>
+</body>
+</html>

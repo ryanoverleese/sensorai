@@ -1,0 +1,2 @@
+/*
+  Content-Security-Policy: frame-ancestors https://*.wixsite.com https://*.editorx.io https://*.wix.com https://*.wixapps.net https://*.wixstatic.com 'self'
