@@ -106,11 +106,35 @@ exports.handler = async (event) => {
       throw new Error(`Failed to add message: ${mRes.status} ${JSON.stringify(details)}`);
     }
 
-    // 3) Run the assistant OR workflow
-    const runPayload = ASSISTANT_ID.startsWith('wf_')
-      ? { workflow_id: ASSISTANT_ID }
-      : { assistant_id: ASSISTANT_ID };
-    console.log('[runs] starting with payload:', runPayload);
+   // 3) Run the workflow directly if wf_, otherwise use assistants API
+let run;
+if (ASSISTANT_ID.startsWith('wf_')) {
+  console.log('[runs] starting workflow:', ASSISTANT_ID);
+  const wfRes = await fetch(`https://api.openai.com/v1/workflows/${ASSISTANT_ID}/runs`, {
+    method: 'POST',
+    headers: openaiHeaders(),
+    body: JSON.stringify({ input: { message: userMessage } })
+  });
+  if (!wfRes.ok) {
+    const details = await safeJson(wfRes);
+    console.error('[workflow] run FAILED:', wfRes.status, details);
+    throw new Error(`Failed to start workflow: ${wfRes.status} ${JSON.stringify(details)}`);
+  }
+  run = await wfRes.json();
+} else {
+  console.log('[runs] starting assistant:', ASSISTANT_ID);
+  const runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
+    method: 'POST',
+    headers: openaiHeaders(),
+    body: JSON.stringify({ assistant_id: ASSISTANT_ID })
+  });
+  if (!runRes.ok) {
+    const details = await safeJson(runRes);
+    console.error('[runs] start FAILED:', runRes.status, details);
+    throw new Error(`Failed to start run: ${runRes.status} ${JSON.stringify(details)}`);
+  }
+  run = await runRes.json();
+}
 
     let runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: 'POST',
