@@ -105,74 +105,73 @@ exports.handler = async (event) => {
   let run = await runRes.json();
   console.log("[runs] started id:", run.id, "status:", run.status);
 
-  // ---- Handle tool calls ----
-  while (run.status === "requires_action") {
-    const calls = run.required_action?.submit_tool_outputs?.tool_calls || [];
-    console.log("[runs] requires_action with", calls.length, "tool calls");
-
-    const outputs = [];
-    for (const c of calls) {
-      console.log("[tool-call] name:", c.function?.name, "id:", c.id);
-      if (c.function?.name === "get_probe_data") {
-        const args = JSON.parse(c.function.arguments || "{}");
-        console.log("[tool-call] args:", args);
-        const data = await getProbeData(args);
-        outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
-      } else {
-        outputs.push({
-          tool_call_id: c.id,
-          output: JSON.stringify({ error: "unknown tool" }),
-        });
-      }
-    }
-
-    const stoRes = await fetch(
-      `${openaiBase}/threads/${thread_id}/runs/${run.id}/submit_tool_outputs`,
-      {
-        method: "POST",
-        headers: openaiHeaders(),
-        body: JSON.stringify({ tool_outputs: outputs }),
-      }
-    );
-
-    if (!stoRes.ok) {
-      const details = await safeJson(stoRes);
-      console.error("[runs] submit_tool_outputs FAILED:", stoRes.status, details);
+  // ---- Poll and handle tool calls in a unified loop ----
+  let maxIterations = 30; // Prevent infinite loops
+  let iterations = 0;
+  
+  while (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled" && run.status !== "expired") {
+    iterations++;
+    if (iterations > maxIterations) {
+      console.error("[runs] exceeded max iterations");
       return {
         statusCode: 500,
-        body: JSON.stringify({
-          error: "Failed to submit tool outputs",
-          details,
-        }),
+        body: JSON.stringify({ error: "Run took too long" }),
       };
     }
 
-    run = await stoRes.json();
-    console.log("[runs] after submit_tool_outputs status:", run.status);
+    console.log(`[runs] iteration ${iterations}, status: ${run.status}`);
 
-    // 🔁 Continue polling until completed
-    while (
-      run.status === "requires_action" ||
-      run.status === "in_progress" ||
-      run.status === "queued"
-    ) {
+    if (run.status === "requires_action") {
+      const calls = run.required_action?.submit_tool_outputs?.tool_calls || [];
+      console.log("[runs] requires_action with", calls.length, "tool calls");
+
+      const outputs = [];
+      for (const c of calls) {
+        console.log("[tool-call] name:", c.function?.name, "id:", c.id);
+        if (c.function?.name === "get_probe_data") {
+          const args = JSON.parse(c.function.arguments || "{}");
+          console.log("[tool-call] args:", args);
+          const data = await getProbeData(args);
+          outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
+        } else {
+          outputs.push({
+            tool_call_id: c.id,
+            output: JSON.stringify({ error: "unknown tool" }),
+          });
+        }
+      }
+
+      const stoRes = await fetch(
+        `${openaiBase}/threads/${thread_id}/runs/${run.id}/submit_tool_outputs`,
+        {
+          method: "POST",
+          headers: openaiHeaders(),
+          body: JSON.stringify({ tool_outputs: outputs }),
+        }
+      );
+
+      if (!stoRes.ok) {
+        const details = await safeJson(stoRes);
+        console.error("[runs] submit_tool_outputs FAILED:", stoRes.status, details);
+        return {
+          statusCode: 500,
+          body: JSON.stringify({
+            error: "Failed to submit tool outputs",
+            details,
+          }),
+        };
+      }
+
+      run = await stoRes.json();
+      console.log("[runs] after submit_tool_outputs status:", run.status);
+    } else if (run.status === "in_progress" || run.status === "queued") {
+      // Wait and poll
       await new Promise((res) => setTimeout(res, 1500));
       const pollRes = await fetch(`${openaiBase}/threads/${thread_id}/runs/${run.id}`, {
         headers: openaiHeaders(),
       });
       run = await pollRes.json();
-      console.log("[runs] polling after tool submit, status:", run.status);
     }
-  }
-
-  // ---- Wait until the run completes ----
-  while (run.status === "in_progress" || run.status === "queued") {
-    await new Promise((res) => setTimeout(res, 1000));
-    const pollRes = await fetch(`${openaiBase}/threads/${thread_id}/runs/${run.id}`, {
-      headers: openaiHeaders(),
-    });
-    run = await pollRes.json();
-    console.log("[runs] polling after tool output, status:", run.status);
   }
 
   // ---- Get final message ----
