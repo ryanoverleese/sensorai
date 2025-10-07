@@ -198,13 +198,30 @@ exports.handler = async (event) => {
       const outputs = [];
       for (const c of calls) {
         console.log("[tool-call] name:", c.function?.name, "id:", c.id);
+        
         if (c.function?.name === "get_probe_data") {
           const args = JSON.parse(c.function.arguments || "{}");
           console.log("[tool-call] args:", args);
           const data = await getProbeData(args);
           console.log("[tool-call] output:", JSON.stringify(data).slice(0, 500));
           outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
-        } else {
+        } 
+        else if (c.function?.name === "get_weather_data") {
+          const args = JSON.parse(c.function.arguments || "{}");
+          console.log("[tool-call] weather args:", args);
+          
+          // Call the weather function
+          const weatherRes = await fetch(`${process.env.URL}/.netlify/functions/weather`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(args)
+          });
+          
+          const weatherData = await weatherRes.json();
+          console.log("[tool-call] weather output:", JSON.stringify(weatherData).slice(0, 500));
+          outputs.push({ tool_call_id: c.id, output: JSON.stringify(weatherData) });
+        }
+        else {
           console.log("[tool-call] unknown tool, returning error");
           outputs.push({
             tool_call_id: c.id,
