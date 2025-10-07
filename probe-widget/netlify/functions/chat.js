@@ -1,6 +1,7 @@
-// netlify/functions/chat.js
-// Netlify Function (Node 18+) that bridges your site to OpenAI Assistants API
-// and proxies tool calls to your Probe API. No client-side keys!
+// netlify/functions/chat.js (patched)
+// Supports OpenAI Assistants/Agents AND Workflows.
+// If ASSISTANT_ID starts with 'wf_', we'll call it as a workflow_id.
+// Otherwise we send assistant_id as before.
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID   = process.env.ASSISTANT_ID;
@@ -23,6 +24,11 @@ function openaiHeaders() {
   };
 }
 
+async function safeJson(res) {
+  const txt = await res.text().catch(() => '');
+  try { return JSON.parse(txt); } catch { return { raw: txt }; }
+}
+
 async function getProbeData(args) {
   const { loggerId, start, end } = args || {};
   if (!loggerId) throw new Error('Missing loggerId');
@@ -34,8 +40,8 @@ async function getProbeData(args) {
     headers: { Authorization: `Bearer ${PROBE_API_KEY}` }
   });
   if (!r.ok) {
-    const txt = await r.text().catch(() => '');
-    throw new Error(`Probe API ${r.status} ${txt}`);
+    const body = await r.text().catch(() => '');
+    throw new Error(`Probe API ${r.status} ${body}`);
   }
   return await r.json();
 }
@@ -54,36 +60,55 @@ exports.handler = async (event) => {
       return { statusCode: 500, headers: corsHeaders(), body: JSON.stringify({ error: 'Missing OPENAI_API_KEY or ASSISTANT_ID in env.' }) };
     }
 
-    const { message, threadId } = JSON.parse(event.body || '{}');
-    if (!message) {
+    const body = JSON.parse(event.body || '{}');
+    const userMessage = body.message;
+    let threadId = body.threadId;
+
+    if (!userMessage) {
       return { statusCode: 400, headers: corsHeaders(), body: JSON.stringify({ error: 'Missing message' }) };
     }
 
     // 1) Create thread if needed
-    let thread_id = threadId;
-    if (!thread_id) {
-      const t = await fetch('https://api.openai.com/v1/threads', {
+    if (!threadId) {
+      const tRes = await fetch('https://api.openai.com/v1/threads', {
         method: 'POST',
         headers: openaiHeaders(),
         body: JSON.stringify({})
-      }).then(r => r.json());
-      if (!t?.id) throw new Error('Failed to create thread');
-      thread_id = t.id;
+      });
+      if (!tRes.ok) {
+        const details = await safeJson(tRes);
+        throw new Error(`Failed to create thread: ${tRes.status} ${JSON.stringify(details)}`);
+      }
+      const t = await tRes.json();
+      threadId = t.id;
     }
 
     // 2) Add user message
-    await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages`, {
+    const mRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
       method: 'POST',
       headers: openaiHeaders(),
-      body: JSON.stringify({ role: 'user', content: message })
+      body: JSON.stringify({ role: 'user', content: userMessage })
     });
+    if (!mRes.ok) {
+      const details = await safeJson(mRes);
+      throw new Error(`Failed to add message: ${mRes.status} ${JSON.stringify(details)}`);
+    }
 
-    // 3) Run the assistant
-    let run = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs`, {
+    // 3) Run the assistant OR workflow
+    const runPayload = ASSISTANT_ID.startsWith('wf_')
+      ? { workflow_id: ASSISTANT_ID }
+      : { assistant_id: ASSISTANT_ID };
+
+    let runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: 'POST',
       headers: openaiHeaders(),
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID })
-    }).then(r => r.json());
+      body: JSON.stringify(runPayload)
+    });
+    if (!runRes.ok) {
+      const details = await safeJson(runRes);
+      throw new Error(`Failed to start run: ${runRes.status} ${JSON.stringify(details)}`);
+    }
+    let run = await runRes.json();
 
     // 4) Handle tool calls until complete
     while (run.status === 'requires_action') {
@@ -98,31 +123,42 @@ exports.handler = async (event) => {
         }
       }
 
-      run = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs/${run.id}/submit_tool_outputs`, {
+      const stoRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}/submit_tool_outputs`, {
         method: 'POST',
         headers: openaiHeaders(),
         body: JSON.stringify({ tool_outputs: outputs })
-      }).then(r => r.json());
+      });
+      if (!stoRes.ok) {
+        const details = await safeJson(stoRes);
+        throw new Error(`Failed to submit tool outputs: ${stoRes.status} ${JSON.stringify(details)}`);
+      }
+      run = await stoRes.json();
     }
 
     // 5) Poll until complete
     while (run.status === 'in_progress' || run.status === 'queued') {
       await new Promise(r => setTimeout(r, 700));
-      run = await fetch(`https://api.openai.com/v1/threads/${thread_id}/runs/${run.id}`, {
+      const pr = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${run.id}`, {
         headers: openaiHeaders()
-      }).then(r => r.json());
+      });
+      run = await pr.json();
     }
 
     // 6) Read the latest assistant message
-    const msgs = await fetch(`https://api.openai.com/v1/threads/${thread_id}/messages?order=desc&limit=1`, {
+    const msgsRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages?order=desc&limit=1`, {
       headers: openaiHeaders()
-    }).then(r => r.json());
-
+    });
+    if (!msgsRes.ok) {
+      const details = await safeJson(msgsRes);
+      throw new Error(`Failed to read messages: ${msgsRes.status} ${JSON.stringify(details)}`);
+    }
+    const msgs = await msgsRes.json();
     const text = msgs?.data?.[0]?.content?.[0]?.text?.value || '(no reply)';
+
     return {
       statusCode: 200,
       headers: { ...corsHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, threadId: thread_id })
+      body: JSON.stringify({ text, threadId })
     };
   } catch (e) {
     return {
