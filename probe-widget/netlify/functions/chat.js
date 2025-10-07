@@ -14,7 +14,8 @@ async function safeJson(res) {
 function openaiHeaders() {
   return {
     'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-    'Content-Type': 'application/json'
+    'Content-Type': 'application/json',
+    'OpenAI-Beta': 'assistants=v2' // 👈 Required for the new Assistants API
   };
 }
 
