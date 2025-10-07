@@ -266,16 +266,25 @@ exports.handler = async (event) => {
           const args = JSON.parse(c.function.arguments || "{}");
           console.log("[tool-call] weather args:", args);
           
-          // Call the weather function
-          const weatherRes = await fetch(`${process.env.URL}/.netlify/functions/weather`, {
+          // Call the weather function - use relative path for same domain
+          const weatherRes = await fetch(`https://soildataai.netlify.app/.netlify/functions/weather`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(args)
           });
           
-          const weatherData = await weatherRes.json();
-          console.log("[tool-call] weather output:", JSON.stringify(weatherData).slice(0, 500));
-          outputs.push({ tool_call_id: c.id, output: JSON.stringify(weatherData) });
+          if (!weatherRes.ok) {
+            const errorText = await weatherRes.text();
+            console.error("[tool-call] weather failed:", weatherRes.status, errorText);
+            outputs.push({ 
+              tool_call_id: c.id, 
+              output: JSON.stringify({ error: "Weather API failed", details: errorText })
+            });
+          } else {
+            const weatherData = await weatherRes.json();
+            console.log("[tool-call] weather output:", JSON.stringify(weatherData).slice(0, 500));
+            outputs.push({ tool_call_id: c.id, output: JSON.stringify(weatherData) });
+          }
         }
         else {
           console.log("[tool-call] unknown tool, returning error");
