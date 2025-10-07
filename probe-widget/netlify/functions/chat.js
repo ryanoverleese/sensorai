@@ -24,30 +24,44 @@ async function getProbeData(args) {
   // Hardcode the logger ID if not provided
   const loggerId = args.loggerId || "25x4gcityw";
   const { start, end } = args;
-  const base = process.env.PROBE_API_BASE;
   const key = process.env.PROBE_API_KEY;
 
-  if (!base || !key) {
-    console.error("[tool:get_probe_data] Missing PROBE_API_BASE or PROBE_API_KEY");
+  if (!key) {
+    console.error("[tool:get_probe_data] Missing PROBE_API_KEY");
     return { error: "Missing API credentials" };
   }
 
-  const url = `${base}/api/v1/loggers/${loggerId}?start=${start || ""}&end=${end || ""}`;
-  console.log("[tool:get_probe_data] URL:", url);
+  // Build URL with query parameters per Sentek API docs
+  let url = `https://www.irrimaxlive.com/api/?cmd=getreadings&key=${key}&name=${loggerId}`;
+  
+  // Add date range if provided (format: YYYYMMDDHHMMSS)
+  if (start) {
+    url += `&from=${start}`;
+  }
+  if (end) {
+    url += `&to=${end}`;
+  }
+  
+  console.log("[tool:get_probe_data] URL:", url.replace(key, "***")); // Hide key in logs
 
-  const res = await fetch(url, {
-    headers: { "Authorization": `Bearer ${key}` }
-  });
+  const res = await fetch(url);
 
   if (!res.ok) {
-    const details = await safeJson(res);
-    console.error("[tool:get_probe_data] FAILED:", res.status, details);
-    return { error: "Failed to fetch probe data", status: res.status, details };
+    const text = await res.text();
+    console.error("[tool:get_probe_data] FAILED:", res.status, text);
+    return { error: "Failed to fetch probe data", status: res.status, details: text };
   }
 
-  const data = await res.json();
-  console.log("[tool:get_probe_data] success");
-  return data;
+  // The API returns CSV, not JSON
+  const csvData = await res.text();
+  console.log("[tool:get_probe_data] success, received", csvData.length, "characters");
+  console.log("[tool:get_probe_data] first 500 chars:", csvData.slice(0, 500));
+  
+  return { 
+    format: "csv",
+    data: csvData,
+    loggerId: loggerId
+  };
 }
 
 // ---- Main Handler ----
