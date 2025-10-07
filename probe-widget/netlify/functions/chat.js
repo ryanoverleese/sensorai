@@ -124,6 +124,7 @@ exports.handler = async (event) => {
     if (run.status === "requires_action") {
       const calls = run.required_action?.submit_tool_outputs?.tool_calls || [];
       console.log("[runs] requires_action with", calls.length, "tool calls");
+      console.log("[runs] full required_action:", JSON.stringify(run.required_action, null, 2));
 
       const outputs = [];
       for (const c of calls) {
@@ -132,8 +133,10 @@ exports.handler = async (event) => {
           const args = JSON.parse(c.function.arguments || "{}");
           console.log("[tool-call] args:", args);
           const data = await getProbeData(args);
+          console.log("[tool-call] output:", JSON.stringify(data).slice(0, 500));
           outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
         } else {
+          console.log("[tool-call] unknown tool, returning error");
           outputs.push({
             tool_call_id: c.id,
             output: JSON.stringify({ error: "unknown tool" }),
@@ -141,6 +144,7 @@ exports.handler = async (event) => {
         }
       }
 
+      console.log("[runs] submitting", outputs.length, "tool outputs");
       const stoRes = await fetch(
         `${openaiBase}/threads/${thread_id}/runs/${run.id}/submit_tool_outputs`,
         {
@@ -171,6 +175,9 @@ exports.handler = async (event) => {
         headers: openaiHeaders(),
       });
       run = await pollRes.json();
+    } else {
+      console.log("[runs] unexpected status, breaking:", run.status);
+      break;
     }
   }
 
