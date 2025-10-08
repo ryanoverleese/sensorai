@@ -30,6 +30,35 @@ function fmtDateTime(d) {
   );
 }
 
+function parseUserDateTime(msg) {
+  // e.g. "september 15", "sept 15 9 pm", "sep 15 at 8:00am"
+  const dateRegex = /(?:on|for|at|around|on the)?\s*([a-zA-Z]+)\s*(\d{1,2})(?:[,\s]+(\d{4}))?/i;
+  const timeRegex = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
+
+  const dateMatch = msg.match(dateRegex);
+  const timeMatch = msg.match(timeRegex);
+
+  if (!dateMatch) return null;
+
+  const monthName = dateMatch[1];
+  const day = parseInt(dateMatch[2]);
+  const year = dateMatch[3] ? parseInt(dateMatch[3]) : new Date().getFullYear();
+
+  let hour = 12;
+  let minute = 0;
+  if (timeMatch) {
+    hour = parseInt(timeMatch[1]);
+    minute = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+    const ampm = timeMatch[3];
+    if (ampm === "pm" && hour < 12) hour += 12;
+    if (ampm === "am" && hour === 12) hour = 0;
+  }
+
+  const parsed = new Date(`${monthName} ${day}, ${year} ${hour}:${minute}`);
+  if (isNaN(parsed)) return null;
+  return parsed;
+}
+
 // ------------------------- MAIN HANDLER -------------------------
 exports.handler = async (event) => {
   try {
@@ -42,10 +71,9 @@ exports.handler = async (event) => {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // ---------------- DATE RANGE LOGIC ----------------
-    let daysBack = 7; // default 7 days
+    let daysBack = 7;
     const now = new Date();
 
-    // Support "past X days/weeks/months"
     const matchDays = msg.match(/past\s+(\d+)\s*day/i);
     const matchWeeks = msg.match(/past\s+(\d+)\s*week/i);
     const matchMonths = msg.match(/past\s+(\d+)\s*month/i);
@@ -57,7 +85,6 @@ exports.handler = async (event) => {
     else if (msg.includes("past two weeks")) daysBack = 14;
     else if (msg.includes("past month")) daysBack = 30;
 
-    // Support "since <month> <day>" or "since June"
     const sinceMatch = msg.match(/since\s+([a-zA-Z]+)\s*(\d{1,2})?/);
     if (sinceMatch) {
       const monthName = sinceMatch[1];
@@ -68,7 +95,6 @@ exports.handler = async (event) => {
       }
     }
 
-    // Safety cap: limit to 120 days max for performance
     if (daysBack > 120) daysBack = 120;
 
     const startDate = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
@@ -81,9 +107,7 @@ exports.handler = async (event) => {
     const r = await fetch(url);
     const csvText = await r.text();
 
-    if (!csvText.includes("Date Time")) {
-      throw new Error("Invalid CSV from IrriMAX API");
-    }
+    if (!csvText.includes("Date Time")) throw new Error("Invalid CSV from IrriMAX API");
 
     const { headers, data } = parseCSV(csvText);
     console.log(`[CSV parsed] ${data.length} rows`);
@@ -96,24 +120,70 @@ exports.handler = async (event) => {
     const temps = headers
       .filter(h => h.startsWith("T"))
       .map((h, i) => ({
-        depth: depthMap[i] || (i * 4 + 2),
-        values: data.map(d => parseFloat(d[h] || "0"))
+        header: h,
+        depth: depthMap[i] || (i * 4 + 2)
       }));
 
     const moistures = headers
       .filter(h => h.startsWith("A"))
       .map((h, i) => ({
-        depth: depthMap[i] || (i * 4 + 2),
-        values: data.map(d => parseFloat(d[h] || "0"))
+        header: h,
+        depth: depthMap[i] || (i * 4 + 2)
       }));
 
-    // Create a summary string for GPT
+    // --- User asked for a specific time/date? ---
+    const userDateTime = parseUserDateTime(msg);
+    const depthMatch = msg.match(/(\d+)\s*(?:in|inch|inches|")/i);
+    const focusDepth = depthMatch ? parseInt(depthMatch[1]) : null;
+    console.log("[Focus Depth]:", focusDepth, " [User date/time]:", userDateTime);
+
+    if (userDateTime && focusDepth) {
+      // Find closest reading
+      let closestRow = null;
+      let closestDiff = Infinity;
+
+      for (const row of data) {
+        const dt = new Date(row["Date Time"]);
+        const diff = Math.abs(dt - userDateTime);
+        if (diff < closestDiff) {
+          closestDiff = diff;
+          closestRow = row;
+        }
+      }
+
+      if (closestRow && closestDiff < 2 * 60 * 60 * 1000) {
+        const tHeader = temps.find(t => t.depth === focusDepth)?.header;
+        const mHeader = moistures.find(m => m.depth === focusDepth)?.header;
+        const tVal = toF(parseFloat(closestRow[tHeader] || "0")).toFixed(1);
+        const mVal = parseFloat(closestRow[mHeader] || "0").toFixed(1);
+        const dtFormatted = new Date(closestRow["Date Time"]).toLocaleString("en-US", {
+          month: "long",
+          day: "numeric",
+          year: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true
+        });
+
+        return {
+          statusCode: 200,
+          body: JSON.stringify({
+            response: `At ${dtFormatted}, the soil at ${focusDepth}" was ${tVal}°F and ${mVal}% moisture.`
+          })
+        };
+      }
+    }
+
+    // --- If not a precise time request, fall back to GPT ---
     const summary = depthMap.map((d, i) => {
-      const tVals = temps[i]?.values || [];
-      const mVals = moistures[i]?.values || [];
+      const tHeader = temps[i]?.header;
+      const mHeader = moistures[i]?.header;
+      if (!tHeader || !mHeader) return "";
+      const tVals = data.map(r => parseFloat(r[tHeader] || "0"));
+      const mVals = data.map(r => parseFloat(r[mHeader] || "0"));
       if (!tVals.length || !mVals.length) return "";
       const lastT = toF(tVals[tVals.length - 1]).toFixed(1);
-      const lastM = mVals[mVals.length - 1]?.toFixed(1);
+      const lastM = mVals[mVals.length - 1].toFixed(1);
       const avgT = toF(tVals.reduce((a, b) => a + b, 0) / tVals.length).toFixed(1);
       const avgM = (mVals.reduce((a, b) => a + b, 0) / mVals.length).toFixed(1);
       return `${d}" — latest ${lastT}°F, ${lastM}% moisture; avg ${avgT}°F, ${avgM}% moisture`;
@@ -128,7 +198,6 @@ exports.handler = async (event) => {
       hour12: true
     });
 
-    // ---------------- GPT PROMPT ----------------
     const prompt = `
 You are Acre Insights' soil data assistant.
 Here is real probe data from the past ${daysBack} days, ending ${formattedDate}.
@@ -139,10 +208,9 @@ ${summary}
 User message:
 "${message}"
 
-Use this data to answer clearly and naturally. 
-If the user asks about trends or patterns, analyze changes over time.
-If they ask for a single depth, focus on that.
-If they say hello or something casual, reply conversationally but stay relevant to soil or weather context.
+Use this data to answer clearly and naturally.
+If the user asks for a date/time (like "on Sept 15 at 9pm"), use the closest reading within ±1h.
+If they ask for trends or patterns, analyze changes.
 `;
 
     const gptRes = await openai.responses.create({
@@ -156,7 +224,6 @@ If they say hello or something casual, reply conversationally but stay relevant 
       statusCode: 200,
       body: JSON.stringify({ response: reply })
     };
-
   } catch (err) {
     console.error("Chat function error:", err);
     return {
