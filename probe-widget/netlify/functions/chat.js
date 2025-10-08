@@ -6,7 +6,7 @@ const fetch = require("node-fetch");
 // -----------------------------
 const API_KEY = process.env.PROBE_API_KEY;               // your IrriMAX key
 const BASE = process.env.PROBE_API_BASE || "https://www.irrimaxlive.com/api/";
-const LOGGER = "25x4gcityw";                       // replace with your logger name
+const LOGGER = "25x4gcityw";                             // replace with your logger name
 const MODEL = "gpt-4o-mini";                             // OpenAI model
 
 // -----------------------------
@@ -55,10 +55,11 @@ async function getLatestSoilData() {
   if (!r.ok) throw new Error(`IrriMAX ${r.status}`);
   const txt = await r.text();
   console.log("IRRIMAX RAW RESPONSE:", txt);
+
   const parts = txt.split(",");
-  const lastValue = parts[0];
-  const unit = parts[4] || "";
-  const timestamp = parts[5] || "";
+  const lastValue = parts[1];      // <--- updated: actual reading
+  const unit = parts[5] || "";
+  const timestamp = parts[0] || "";
   return { value: parseFloat(lastValue), unit, timestamp };
 }
 
@@ -75,11 +76,13 @@ async function getSoilDataForDateAndPane(dateObj, paneNo = 0) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`IrriMAX ${r.status}`);
   const csv = await r.text();
+  console.log("IRRIMAX RAW RESPONSE:", csv);
+
   const lines = csv.trim().split("\n");
   if (lines.length < 2) throw new Error("No data found for that day/pane");
 
   const lastLine = lines[lines.length - 1].split(",");
-  const value = parseFloat(lastLine[1]); // adjust index if needed after seeing CSV sample
+  const value = parseFloat(lastLine[1]); // adjust later if needed
   const timestamp = lastLine[0];
   return { value, timestamp };
 }
@@ -137,21 +140,20 @@ exports.handler = async (event) => {
     let context = "";
 
     if (depth && date) {
-      // e.g. "6 inch" => pane 1, adjust map as needed
       const paneMap = { 4: 0, 6: 1, 8: 2, 12: 3 };
       const pane = paneMap[depth] ?? 0;
       soil = await getSoilDataForDateAndPane(date, pane);
-      context = `Soil temp at ${depth}" depth on ${date.toDateString()} was ${soil.value}°F at ${soil.timestamp}.`;
+      context = `Soil temp at ${depth}" depth on ${date.toDateString()} was ${soil.value} ${soil.unit || ""} at ${soil.timestamp}.`;
     } 
     else if (/yesterday/i.test(msg)) {
       const y = new Date();
       y.setDate(y.getDate() - 1);
       soil = await getSoilDataForDateAndPane(y, 0);
-      context = `Yesterday's soil temp was ${soil.value}°F at ${soil.timestamp}.`;
+      context = `Yesterday's soil temp was ${soil.value} ${soil.unit || ""} at ${soil.timestamp}.`;
     } 
     else {
       soil = await getLatestSoilData();
-      context = `Current soil temp is ${soil.value}${soil.unit} as of ${soil.timestamp}.`;
+      context = `Current soil temp is ${soil.value} ${soil.unit || ""} as of ${soil.timestamp}.`;
     }
 
     const reply = await callOpenAI(`${context}\nUser asked: ${msg}`);
