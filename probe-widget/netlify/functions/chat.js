@@ -18,7 +18,7 @@ function toF(c) {
   return (parseFloat(c) * 9) / 5 + 32;
 }
 
-function fmt(d) {
+function fmtDateTime(d) {
   const pad = n => String(n).padStart(2, "0");
   return (
     d.getFullYear().toString() +
@@ -39,62 +39,18 @@ exports.handler = async (event) => {
 
     const apiKey = process.env.PROBE_API_KEY;
     const loggerId = "25x4gcityw";
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const miniModel = "gpt-4o-mini";
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ---------------- INTENT DETECTION ----------------
-    const intentPrompt = `
-You are an intent parser for a soil data assistant.
-Read the user's message and respond ONLY in JSON with:
-{
-  "intent": "get_current" | "get_trend" | "smalltalk",
-  "metric": "temperature" | "moisture" | null,
-  "depth": number or null,
-  "period": number of days or null
-}
-User message: "${message}"
-`;
-
-    let intent = { intent: "get_current", metric: null, depth: null, period: null };
-
-    try {
-      const intentRes = await client.responses.create({
-        model: miniModel,
-        input: intentPrompt
-      });
-      const text = intentRes.output[0]?.content[0]?.text || "{}";
-      intent = JSON.parse(text);
-    } catch (e) {
-      console.log("Intent parse failed, using defaults", e.message);
-    }
-
-    console.log("[Intent Detected]:", intent);
-
-    if (intent.intent === "smalltalk") {
-      const friendly = await client.responses.create({
-        model: miniModel,
-        input: `You are Acre Insights' friendly assistant. The user said: "${message}". 
-        Respond conversationally but briefly — one sentence max.`
-      });
-      const text = friendly.output[0]?.content[0]?.text || "Hey there! Ready to check your field data?";
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ response: text })
-      };
-    }
-
-    // ---------------- DATE RANGE ----------------
-    let daysBack = intent.period || 7; // default
-    const now = new Date();
-
+    // ---------------- DATE RANGE LOGIC ----------------
+    let daysBack = 7;
+    if (msg.includes("past month")) daysBack = 30;
     const matchDays = msg.match(/past\s+(\d+)\s+day/i);
     if (matchDays) daysBack = parseInt(matchDays[1]);
-    if (msg.includes("past week")) daysBack = 7;
-    if (msg.includes("past month")) daysBack = 30;
 
+    const now = new Date();
     const startDate = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
-    const from = fmt(startDate);
-    const to = fmt(now);
+    const from = fmtDateTime(startDate);
+    const to = fmtDateTime(now);
 
     const url = `https://www.irrimaxlive.com/api/?cmd=getreadings&key=${apiKey}&name=${loggerId}&from=${from}&to=${to}`;
     console.log("[IrriMAX URL]:", url);
@@ -107,36 +63,39 @@ User message: "${message}"
     }
 
     const { headers, data } = parseCSV(csvText);
-    const latest = data[data.length - 1];
+    console.log(`[CSV parsed] ${data.length} rows`);
 
-    // ---------------- DEPTH MAP ----------------
+    // ---------------- DATA PROCESSING ----------------
     const depthMap = [2, 6, 10, 14, 18, 22, 26, 30, 33, 37, 41, 45];
+    const latest = data[data.length - 1];
+    const latestDate = new Date(latest["Date Time"]);
 
-    // ---------------- SENSOR EXTRACTION ----------------
     const temps = headers
       .filter(h => h.startsWith("T"))
       .map((h, i) => ({
         depth: depthMap[i] || (i * 4 + 2),
-        val: parseFloat(latest[h] || "0")
+        values: data.map(d => parseFloat(d[h] || "0"))
       }));
 
     const moistures = headers
       .filter(h => h.startsWith("A"))
       .map((h, i) => ({
         depth: depthMap[i] || (i * 4 + 2),
-        val: parseFloat(latest[h] || "0")
+        values: data.map(d => parseFloat(d[h] || "0"))
       }));
 
-    // ---------------- DETERMINE FOCUS ----------------
-    const depthMatch = msg.match(/(\d+)\s*(?:in|inch|inches|")/i);
-    const focusDepth = intent.depth || (depthMatch ? parseInt(depthMatch[1]) : null);
-    console.log("[Focus Depth]:", focusDepth);
+    // Create a short summary string for GPT
+    const summary = depthMap.map((d, i) => {
+      const tVals = temps[i]?.values || [];
+      const mVals = moistures[i]?.values || [];
+      const lastT = toF(tVals[tVals.length - 1]).toFixed(0);
+      const lastM = mVals[mVals.length - 1]?.toFixed(1);
+      const avgT = toF(tVals.reduce((a, b) => a + b, 0) / tVals.length).toFixed(0);
+      const avgM = (mVals.reduce((a, b) => a + b, 0) / mVals.length).toFixed(1);
+      return `${d}" — latest ${lastT}°F, ${lastM}% moisture; avg ${avgT}°F, ${avgM}% moisture`;
+    }).join("\n");
 
-    const wantsTemp = intent.metric === "temperature" || msg.includes("temp");
-    const wantsMoisture = intent.metric === "moisture" || msg.includes("moist");
-
-    const date = new Date(latest["Date Time"]);
-    const formattedDate = date.toLocaleString("en-US", {
+    const formattedDate = latestDate.toLocaleString("en-US", {
       month: "long",
       day: "numeric",
       year: "numeric",
@@ -145,61 +104,35 @@ User message: "${message}"
       hour12: true
     });
 
-    // ---------------- BUILD RESPONSE ----------------
-    let response = "";
+    // ---------------- GPT PROMPT ----------------
+    const prompt = `
+You are Acre Insights' soil data assistant.
+Here is real probe data from the past ${daysBack} days, ending ${formattedDate}.
 
-    if (focusDepth) {
-      const t = temps.find(x => x.depth === focusDepth);
-      const m = moistures.find(x => x.depth === focusDepth);
+Data summary (depths in inches):
+${summary}
 
-      if (wantsTemp && t) {
-        response = `**Soil Temperature — ${formattedDate}**\n• ${focusDepth}" — ${toF(t.val).toFixed(0)}°F`;
-      } else if (wantsMoisture && m) {
-        response = `**Soil Moisture — ${formattedDate}**\n• ${focusDepth}" — ${m.val.toFixed(1)}%`;
-      } else if (t && m) {
-        response = `**Soil Conditions — ${formattedDate}**\n• ${focusDepth}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
-      }
-    } else {
-      const lines = depthMap.map((d, i) => {
-        const t = temps[i];
-        const m = moistures[i];
-        if (wantsTemp && t) return `• ${d}" — ${toF(t.val).toFixed(0)}°F`;
-        if (wantsMoisture && m) return `• ${d}" — ${m.val.toFixed(1)}%`;
-        return `• ${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
-      });
-      response = `**Soil ${wantsTemp ? "Temperature" : wantsMoisture ? "Moisture" : "Conditions"} — ${formattedDate}**\n${lines.join("\n")}`;
-    }
+User message:
+"${message}"
 
-    // ---------------- TREND ANALYSIS ----------------
-    if (intent.intent === "get_trend") {
-      const trendPrompt = `
-You are Acre Insights' probe analysis assistant.
-The user asked: "${message}"
-
-Focus on ${focusDepth ? `${focusDepth}-inch sensor` : "all sensors"}.
-Here are readings from the past ${daysBack} days (°F and % moisture):
-${depthMap.map((d, i) => {
-  const t = temps[i], m = moistures[i];
-  return `${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}%`;
-}).join("\n")}
-
-Analyze trends relevant to the user's query. Respond clearly and concisely.
+Use this data to answer clearly and naturally. 
+If the user asks about trends or patterns, analyze changes over time.
+If they ask for a single depth, focus on that.
+If they say hello or something casual, reply conversationally but stay relevant to soil or weather context.
 `;
 
-      const trendRes = await client.responses.create({
-        model: miniModel,
-        input: trendPrompt
-      });
+    const gptRes = await openai.responses.create({
+      model: "gpt-4o-mini",
+      input: prompt
+    });
 
-      const trendText = trendRes.output[0]?.content[0]?.text || "Trend analysis unavailable.";
-      response = trendText;
-    }
+    const reply = gptRes.output[0]?.content[0]?.text || "No response generated.";
 
-    // ---------------- RETURN ----------------
     return {
       statusCode: 200,
-      body: JSON.stringify({ response })
+      body: JSON.stringify({ response: reply })
     };
+
   } catch (err) {
     console.error("Chat function error:", err);
     return {
