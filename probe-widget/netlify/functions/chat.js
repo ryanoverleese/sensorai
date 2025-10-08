@@ -166,14 +166,32 @@ exports.handler = async (event) => {
         )
         .filter(Boolean);
 
-      const lines = temps
-        .map((t, i) => {
-          const m = moistures[i];
-          return `• ${t.depth}" — ${Math.round(t.val * 9 / 5 + 32)}°F, ${m?.val.toFixed(1)}% moisture`;
-        })
-        .join("\n");
+     let lines = "";
 
-      const summary = `**Soil Conditions — ${formattedDate}**\n${lines}`;
+if (msg.includes("moisture") && !msg.includes("temp")) {
+  // --- Only moisture ---
+  lines = moistures
+    .map((m) => `• ${m.depth}" — ${m.val.toFixed(1)}% moisture`)
+    .join("\n");
+
+} else if (msg.includes("temp") || msg.includes("temperature")) {
+  // --- Only temperature ---
+  lines = temps
+    .map((t) => `• ${t.depth}" — ${Math.round(t.val * 9 / 5 + 32)}°F`)
+    .join("\n");
+
+} else {
+  // --- Both ---
+  lines = temps
+    .map((t, i) => {
+      const m = moistures[i];
+      return `• ${t.depth}" — ${Math.round(t.val * 9 / 5 + 32)}°F, ${m?.val.toFixed(1)}% moisture`;
+    })
+    .join("\n");
+}
+
+const summary = `**Soil Conditions — ${formattedDate}**\n${lines}`;
+
 
       return ok({ response: summary });
     }
