@@ -41,7 +41,7 @@ exports.handler = async (event) => {
 
     const apiKey = process.env.PROBE_API_KEY;
     const loggerId = "25x4gcityw";
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // ---- Pull up to 180 days of data ----
     const now = new Date();
@@ -68,37 +68,39 @@ exports.handler = async (event) => {
     const depthMap = [2, 6, 10, 14, 18, 22, 26, 30, 33, 37, 41, 45];
 
     // ---- Build compact history ----
-    const compactHistory = reduced.map(row => {
-      const utcDate = new Date(row["Date Time"]);
-const dt = utcDate.toLocaleString("en-US", {
-  timeZone: "America/Chicago",
-  month: "short",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  hour12: true
-});
+    const compactHistory = reduced
+      .map(row => {
+        const utcDate = new Date(row["Date Time"]);
+        const dt = utcDate.toLocaleString("en-US", {
+          timeZone: "America/Chicago",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        });
 
-      const temps = headers
-        .filter(h => h.startsWith("T"))
-        .map((h, i) => {
-          const v = safeToF(row[h]);
-          return v !== null ? `${depthMap[i] || i * 4 + 2}"=${v.toFixed(1)}°F` : null;
-        })
-        .filter(Boolean)
-        .join(", ");
+        const temps = headers
+          .filter(h => h.startsWith("T"))
+          .map((h, i) => {
+            const v = safeToF(row[h]);
+            return v !== null ? `${depthMap[i] || i * 4 + 2}"=${v.toFixed(1)}°F` : null;
+          })
+          .filter(Boolean)
+          .join(", ");
 
-      const moist = headers
-        .filter(h => h.startsWith("A"))
-        .map((h, i) => {
-          const m = parseFloat(row[h]);
-          return !isNaN(m) ? `${depthMap[i] || i * 4 + 2}"=${m.toFixed(1)}%` : null;
-        })
-        .filter(Boolean)
-        .join(", ");
+        const moist = headers
+          .filter(h => h.startsWith("A"))
+          .map((h, i) => {
+            const m = parseFloat(row[h]);
+            return !isNaN(m) ? `${depthMap[i] || i * 4 + 2}"=${m.toFixed(1)}%` : null;
+          })
+          .filter(Boolean)
+          .join(", ");
 
-      return `${dt} | Temp: ${temps} | Moist: ${moist}`;
-    }).join("\n");
+        return `${dt} | Temp: ${temps} | Moist: ${moist}`;
+      })
+      .join("\n");
 
     // ---- GPT Prompt ----
     const prompt = `
@@ -116,48 +118,27 @@ User message:
 "${message}"
 `;
 
-    const { OpenAI } = require("openai");
-
-exports.handler = async (event) => {
-  try {
-    const { message } = JSON.parse(event.body || "{}");
-    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+    // ---- STREAMING GPT RESPONSE ----
     const stream = await client.responses.stream({
       model: "gpt-4o-mini",
-      input: message,
+      input: prompt,
     });
 
     let full = "";
-    for await (const event of stream) {
-      if (event.type === "response.output_text.delta") full += event.delta;
+    for await (const ev of stream) {
+      if (ev.type === "response.output_text.delta") full += ev.delta;
     }
 
     return {
       statusCode: 200,
-      body: JSON.stringify({ response: full })
+      body: JSON.stringify({ response: full }),
     };
-  } catch (err) {
-    console.error("Stream error:", err);
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
-  }
-};
 
-      model: "gpt-4o-mini",
-      input: prompt
-    });
-
-    const reply = gptRes.output?.[0]?.content?.[0]?.text || "No response generated.";
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ response: reply })
-    };
   } catch (err) {
     console.error("Chat function error:", err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: err.message })
+      body: JSON.stringify({ error: err.message }),
     };
   }
 };
