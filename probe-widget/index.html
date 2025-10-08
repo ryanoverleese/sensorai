@@ -78,8 +78,9 @@
           body: JSON.stringify({ message: text })
         });
 
-        const reply = await r.text();
-        add('assistant', reply);
+        const data = await r.json();
+add('assistant', data.response || JSON.stringify(data, null, 2));
+
 
       } catch (e) {
         add('assistant', '⚠️ Error: ' + e.message);
