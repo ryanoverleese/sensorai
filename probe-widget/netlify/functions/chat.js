@@ -54,6 +54,7 @@ async function getLatestSoilData() {
   const r = await fetch(url);
   if (!r.ok) throw new Error(`IrriMAX ${r.status}`);
   const txt = await r.text();
+  console.log("IRRIMAX RAW RESPONSE:", txt);
   const parts = txt.split(",");
   const lastValue = parts[0];
   const unit = parts[4] || "";
