@@ -4,10 +4,12 @@ const fetch = require("node-fetch");
 // CONFIGURATION
 // ----------------------------
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
-const IRRIMAX_KEY = process.env.PROBE_API_KEY;
-const IRRIMAX_BASE = process.env.PROBE_API_BASE || "https://api.irrimaxlive.com/av1/";
-const LOGGER = "25x4gcityw"; // replace with your actual logger ID
 const MODEL = "gpt-4o-mini";
+
+// Your IrriMAX settings:
+const IRRIMAX_KEY = "72c6113e-02bc-42cb-b106-dc4bec979857";
+const IRRIMAX_BASE = "https://www.irrimaxlive.com/api";
+const LOGGER = "25x4gcityw";
 
 // ----------------------------
 // HELPERS
@@ -28,29 +30,35 @@ function err(code, obj) {
   };
 }
 
+function toF(c) {
+  return (c * 9) / 5 + 32;
+}
+
 function parseDepth(text) {
   text = text.toLowerCase();
   const cmMatch = text.match(/(\d+)\s*cm/);
   const inchMatch = text.match(/(\d+)\s*(in|inch|inches)/);
-  let depthCm = 15; // default to 15 cm (~6 in)
+  let depthCm = 15; // default ≈ 6 inch
   if (cmMatch) depthCm = parseInt(cmMatch[1]);
   if (inchMatch) depthCm = parseInt(inchMatch[1]) * 2.54;
   return depthCm;
 }
 
-function closestDepthColumn(headers, depthCm) {
-  const tCols = headers
-    .filter(h => /^T\d+\(\d+\)/.test(h))
+function findClosestColumn(headers, type, depthCm) {
+  // type = "T" (temperature) or "A" (moisture)
+  const cols = headers
+    .filter(h => new RegExp(`^${type}\\d+\\(\\d+\\)`).test(h))
     .map(h => ({
       name: h,
       depth: parseInt(h.match(/\((\d+)\)/)?.[1] || 0)
     }));
-  let closest = tCols[0];
-  for (const col of tCols) {
+  if (!cols.length) return null;
+  let closest = cols[0];
+  for (const col of cols) {
     if (Math.abs(col.depth - depthCm) < Math.abs(closest.depth - depthCm))
       closest = col;
   }
-  return closest?.name;
+  return closest;
 }
 
 // ----------------------------
@@ -61,30 +69,23 @@ exports.handler = async (event) => {
 
   let body = {};
   try { body = JSON.parse(event.body || "{}"); } catch {}
-  const msg = body.message || "";
+  const msg = (body.message || "").toLowerCase();
 
   if (msg === "__ping") return ok({ ok: true, echo: "__pong" });
 
   try {
-    // Detect if user asked for soil temp
-    const lower = msg.toLowerCase();
-    if (lower.includes("soil temp")) {
-      const depthCm = parseDepth(lower);
-      const result = await getSoilTemp(depthCm);
-      return ok({
-        threadId: null,
-        response: result,
-        runStatus: "completed",
-      });
+    // Determine intent
+    if (msg.includes("soil") || msg.includes("temp") || msg.includes("moisture")) {
+      const depthCm = parseDepth(msg);
+      const isTemp = msg.includes("temp");
+      const isMoisture = msg.includes("moisture") || msg.includes("vwc");
+      const result = await getSoilReading(depthCm, isTemp, isMoisture);
+      return ok({ threadId: null, response: result, runStatus: "completed" });
     }
 
-    // Default: let OpenAI handle it
-    const ai = await askOpenAI(msg);
-    return ok({
-      threadId: null,
-      response: ai,
-      runStatus: "completed",
-    });
+    // Default fallback to AI
+    const ai = await askOpenAI(body.message || "");
+    return ok({ threadId: null, response: ai, runStatus: "completed" });
 
   } catch (e) {
     console.error("Chat function error:", e);
@@ -93,28 +94,38 @@ exports.handler = async (event) => {
 };
 
 // ----------------------------
-// DATA FUNCTIONS
+// DATA FETCH + PARSE
 // ----------------------------
-async function getSoilTemp(depthCm) {
-  const url = `${IRRIMAX_BASE}?cmd=getgraphvalues&key=${IRRIMAX_KEY}&name=${LOGGER}`;
+async function getSoilReading(depthCm, isTemp, isMoisture) {
+  const url = `${IRRIMAX_BASE}?cmd=getreadings&key=${IRRIMAX_KEY}&name=${LOGGER}`;
   const r = await fetch(url);
   const csv = await r.text();
-console.log("IRRIMAX CSV HEADERS SAMPLE:", csv.split("\n")[0]);
 
   const lines = csv.trim().split("\n");
   const headers = lines[0].split(",");
   const lastRow = lines[lines.length - 1].split(",");
-
-  const colName = closestDepthColumn(headers, depthCm);
-  if (!colName) throw new Error("No temperature columns found in data.");
-
-  const idx = headers.indexOf(colName);
-  const valueC = parseFloat(lastRow[idx]);
   const timestamp = lastRow[0];
 
-  const valueF = (valueC * 9) / 5 + 32;
+  // Select column type
+  let type = "T";
+  if (isMoisture) type = "A";
 
-  return `At ${timestamp}, the soil temperature at approximately ${depthCm.toFixed(0)} cm (${(depthCm/2.54).toFixed(1)} in) was ${valueC.toFixed(1)}°C (${valueF.toFixed(1)}°F).`;
+  const colInfo = findClosestColumn(headers, type, depthCm);
+  if (!colInfo) throw new Error(`No ${type} columns found`);
+
+  const idx = headers.indexOf(colInfo.name);
+  const value = parseFloat(lastRow[idx]);
+
+  // Build human-readable depth label
+  const depthIn = depthCm / 2.54;
+  const label = `${colInfo.depth} cm (${depthIn.toFixed(1)} in)`;
+
+  if (type === "T") {
+    const valueF = toF(value);
+    return `At ${timestamp}, the soil temperature at ${label} was ${value.toFixed(1)} °C (${valueF.toFixed(1)} °F).`;
+  } else {
+    return `At ${timestamp}, the volumetric water content (moisture) at ${label} was ${value.toFixed(2)}%.`;
+  }
 }
 
 // ----------------------------
@@ -135,7 +146,7 @@ async function askOpenAI(userMsg) {
       body: JSON.stringify({
         model: MODEL,
         messages: [
-          { role: "system", content: "You are a helpful agronomy assistant that helps interpret soil probe data." },
+          { role: "system", content: "You are a helpful agronomy assistant that interprets soil probe data from IrriMAX Live." },
           { role: "user", content: userMsg },
         ],
       }),
