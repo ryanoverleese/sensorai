@@ -99,6 +99,7 @@ async function getSoilTemp(depthCm) {
   const url = `${IRRIMAX_BASE}?cmd=getgraphvalues&key=${IRRIMAX_KEY}&name=${LOGGER}`;
   const r = await fetch(url);
   const csv = await r.text();
+console.log("IRRIMAX CSV HEADERS SAMPLE:", csv.split("\n")[0]);
 
   const lines = csv.trim().split("\n");
   const headers = lines[0].split(",");
