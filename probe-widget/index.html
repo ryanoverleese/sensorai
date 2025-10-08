@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="en">
 <head>
@@ -12,16 +11,16 @@
     .header { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
     .dot { width:8px; height:8px; border-radius:50%; background:#0ea5e9; }
     .title { font-weight:700; font-size:16px; }
-    #log { max-height: 50vh; overflow:auto; padding:6px 0; }
-    .bubble { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.3; font-size:14px; word-break: break-word; }
+    #log { max-height: 50vh; overflow:auto; padding:6px 0; display:flex; flex-direction:column; }
+    .bubble { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.4; font-size:14px; word-break: break-word; white-space:pre-line; }
     .user { background:#e6f2fe; align-self:flex-end; }
-    .assistant { background:#f2f2f3; }
-    .row { display:flex; gap:6px; }
+    .assistant { background:#f2f2f3; align-self:flex-start; }
+    .row { display:flex; gap:6px; margin-top:6px; }
     .row input { flex:1; padding:10px; border-radius:10px; border:1px solid #e5e7eb; font-size:14px; }
     .row button { padding:10px 14px; border:0; border-radius:10px; background:#0ea5e9; color:#fff; font-weight:600; cursor:pointer; font-size:14px; }
     .row button:disabled { opacity:.6; cursor:not-allowed; }
     .footer { color:#6b7280; font-size:11px; margin-top:6px; text-align:center; }
-    
+
     @media (max-width: 600px) {
       .wrap { padding: 8px; }
       .card { padding: 10px; border-radius:10px; }
@@ -37,56 +36,58 @@
 <body>
   <div class="wrap">
     <div class="card">
-      <div class="header"><div class="dot"></div><div class="title">Probe Assistant</div></div>
+      <div class="header">
+        <div class="dot"></div>
+        <div class="title">Probe Assistant</div>
+      </div>
       <div id="log" class="column"></div>
       <div class="row">
-        <input id="msg" type="text" placeholder="Ask me about sensor data" />
+        <input id="msg" type="text" placeholder="Ask me about sensor data..." />
         <button id="send">Send</button>
       </div>
       <div class="footer">Powered by Acre Insights</div>
     </div>
   </div>
+
   <script>
     const log = document.getElementById('log');
     const input = document.getElementById('msg');
     const btn = document.getElementById('send');
-    let threadId = null;
-    
+
     function add(role, text) {
       const div = document.createElement('div');
       div.className = `bubble ${role}`;
-      div.innerHTML = (text || '').replace(/\n/g, '<br/>');
+      div.innerHTML = text
+        .replace(/\n/g, '<br>')
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); // handle bold
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
     }
-    
+
     async function send() {
       const text = input.value.trim();
       if (!text) return;
       add('user', text);
       input.value = '';
       btn.disabled = true;
-      
+
       try {
         const r = await fetch('/.netlify/functions/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text, threadId })
+          body: JSON.stringify({ message: text })
         });
-        
-        const data = await r.json();
-        threadId = data.threadId || threadId;
-        
-        // Show full response including errors
-        add('assistant', JSON.stringify(data, null, 2));
-        
+
+        const reply = await r.text();
+        add('assistant', reply);
+
       } catch (e) {
-        add('assistant', 'Error: ' + e.message);
+        add('assistant', '⚠️ Error: ' + e.message);
       } finally {
         btn.disabled = false;
       }
     }
-    
+
     btn.addEventListener('click', send);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') send();
@@ -94,5 +95,3 @@
   </script>
 </body>
 </html>
-
-
