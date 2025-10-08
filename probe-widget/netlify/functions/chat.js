@@ -116,7 +116,33 @@ User message:
 "${message}"
 `;
 
-    const gptRes = await openai.responses.create({
+    const { OpenAI } = require("openai");
+
+exports.handler = async (event) => {
+  try {
+    const { message } = JSON.parse(event.body || "{}");
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+    const stream = await client.responses.stream({
+      model: "gpt-4o-mini",
+      input: message,
+    });
+
+    let full = "";
+    for await (const event of stream) {
+      if (event.type === "response.output_text.delta") full += event.delta;
+    }
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ response: full })
+    };
+  } catch (err) {
+    console.error("Stream error:", err);
+    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+  }
+};
+
       model: "gpt-4o-mini",
       input: prompt
     });
