@@ -69,7 +69,16 @@ exports.handler = async (event) => {
 
     // ---- Build compact history ----
     const compactHistory = reduced.map(row => {
-      const dt = row["Date Time"];
+      const utcDate = new Date(row["Date Time"]);
+const dt = utcDate.toLocaleString("en-US", {
+  timeZone: "America/Chicago",
+  month: "short",
+  day: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  hour12: true
+});
+
       const temps = headers
         .filter(h => h.startsWith("T"))
         .map((h, i) => {
