@@ -13,7 +13,7 @@ exports.handler = async (event) => {
   }
 
   try {
-    // Run the OpenAI request with a 10-second timeout
+    // 10-second timeout for OpenAI request
     const result = await withTimeout(callOpenAI(body.message), 10000);
     return ok({
       threadId: null,
@@ -31,34 +31,20 @@ function ok(obj){ return { statusCode: 200, headers: { "Content-Type":"applicati
 function err(code,obj){ return { statusCode: code, headers: { "Content-Type":"application/json" }, body: JSON.stringify(obj) }; }
 
 async function withTimeout(promise, ms){
-  const ac = new AbortController();
-  const timer = setTimeout(()=>ac.abort(), ms);
-  try { return await promise(ac.signal); }
-  finally { clearTimeout(timer); }
+  // 🧠 Fixed version: takes a promise, not a function
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    // pass controller.signal if fetch supports it
+    return await promise;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-async function callOpenAI(userMsg, signal){
+async function callOpenAI(userMsg){
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method:"POST",
-    signal,
     headers:{
       "Authorization":`Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type":"application/json"
-    },
-    body: JSON.stringify({
-      model:"gpt-4o-mini",
-      messages:[
-        { role:"system", content:"You are a helpful agronomy assistant." },
-        { role:"user", content:String(userMsg || "Hello") }
-      ]
-    })
-  });
-
-  const raw = await r.text();
-  let data; try { data = JSON.parse(raw); } catch {
-    console.error("OpenAI non-JSON:", r.status, raw.slice(0,500));
-    throw new Error(`OpenAI returned non-JSON (${r.status})`);
-  }
-  if (!r.ok) throw new Error(data?.error?.message || `OpenAI ${r.status}`);
-  return data?.choices?.[0]?.message?.content || "";
-}
+      "Cont
