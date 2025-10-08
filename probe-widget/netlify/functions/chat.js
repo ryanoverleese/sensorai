@@ -1,9 +1,7 @@
 // netlify/functions/chat.js
 const fetch = require("node-fetch");
 
-/* ===========================
-   OpenAI helpers
-=========================== */
+/* --------------------------- helpers --------------------------- */
 function openaiHeaders() {
   return {
     "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
@@ -17,13 +15,11 @@ async function safeJson(res) {
   catch (e) { return { error: "Invalid JSON", details: e.message }; }
 }
 
-/* ===========================
-   Date helpers (IrriMAX)
-=========================== */
-function toIrrimax14(d) {
-  const pad = n => String(n).padStart(2, "0");
+// IrriMAX requires YYYYMMDDHHMMSS
+function toIrrimax(d) {
+  const pad = (n) => String(n).padStart(2, "0");
   return (
-    d.getFullYear() +
+    d.getFullYear().toString() +
     pad(d.getMonth() + 1) +
     pad(d.getDate()) +
     pad(d.getHours()) +
@@ -32,301 +28,227 @@ function toIrrimax14(d) {
   );
 }
 
-// Accept 14-digit, 8-digit, or free-form → always return 14-digit
-function normalizeIrrimax(s, isEnd = false) {
-  if (typeof s !== "string" || !s.trim()) return null;
-  const clean = s.replace(/\D/g, "");
-  if (/^\d{14}$/.test(clean)) return clean;
-  if (/^\d{8}$/.test(clean)) return isEnd ? `${clean}235959` : `${clean}000000`;
-  const d = new Date(s);
-  if (!isNaN(d)) {
-    if (isEnd) d.setHours(23, 59, 59, 0);
-    else d.setHours(0, 0, 0, 0);
-    return toIrrimax14(d);
-  }
-  return null;
+// Day key: 'YYYY-MM-DD'
+function dayKey(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
-function monthRanges(startDate, endDate) {
-  const result = [];
-  const d = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
-  const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
-  while (d <= end) {
-    const mStart = new Date(d);
-    const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
-    result.push([mStart, mEnd]);
-    d.setMonth(d.getMonth() + 1);
-  }
-  return result;
+// Normalize YYYY-MM-DD or YYYY/MM/DD → YYYYMMDD (also accepts already-compact)
+function normDayStr(s) {
+  return String(s || "").replace(/[^0-9]/g, "").slice(0, 8); // keep first 8 digits
 }
 
-function ymd(date) {
-  const p = n => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
-}
+// Best-effort parse incoming start/end (YYYYMMDD or YYYY-MM-DD)
+function coerceDayRange(args, allDays) {
+  // if user didn’t pass any, return nulls (no clip)
+  let { startDay, endDay } = args || {};
+  if (!startDay && !endDay) return { startDay: null, endDay: null };
 
-/* ===========================
-   Aliases
-=========================== */
-function loadAliases() {
-  try {
-    const raw = process.env.LOGGER_ALIASES || "{}";
-    const obj = JSON.parse(raw);
-    const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-    const map = {};
-    Object.keys(obj).forEach(k => { map[norm(k)] = obj[k]; });
-    return { map, norm };
-  } catch {
-    const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-    return { map: {}, norm };
-  }
-}
-const { map: LOGGER_MAP, norm: normKey } = loadAliases();
+  // Support multiple aliases from the assistant (“start”, “end” from older code)
+  startDay = startDay || args.start || null;
+  endDay = endDay || args.end || null;
 
-function resolveLoggerId({ alias, loggerId, text }) {
-  if (loggerId && String(loggerId).trim()) return String(loggerId).trim();
-  if (alias && LOGGER_MAP[normKey(alias)]) return LOGGER_MAP[normKey(alias)];
-  if (text) {
-    const t = text.toLowerCase();
-    const best = Object.keys(LOGGER_MAP).sort((a,b) => b.length - a.length).find(k => t.includes(k));
-    if (best) return LOGGER_MAP[best];
-  }
-  return null;
-}
+  // If they sent timestamps (YYYYMMDDHHMMSS), reduce to YYYYMMDD
+  if (startDay && /^\d{14}$/.test(startDay)) startDay = startDay.slice(0, 8);
+  if (endDay && /^\d{14}$/.test(endDay)) endDay = endDay.slice(0, 8);
 
-/* ===========================
-   CSV → Daily rollup with extrema
-=========================== */
-function dailyRollupWithExtrema(csv) {
-  const lines = (csv || "").trim().split(/\r?\n/);
-  if (lines.length < 2) return { header: null, daily: {} };
+  // Normalize
+  const sNorm = startDay ? normDayStr(startDay) : null;
+  const eNorm = endDay ? normDayStr(endDay) : null;
 
-  const hdr = lines[0].split(",");
-  const daily = {}; // date -> { count, cols: { idx: { sum, min, minTs, max, maxTs } } }
-
-  for (let i = 1; i < lines.length; i++) {
-    const row = lines[i].split(",");
-    const ts = row[0]; if (!ts) continue;
-    const date = ts.split(" ")[0];
-    if (!daily[date]) daily[date] = { count: 0, cols: {} };
-    daily[date].count++;
-
-    for (let c = 1; c < hdr.length; c++) {
-      const v = parseFloat(row[c]);
-      if (Number.isNaN(v)) continue;
-      const col = (daily[date].cols[c] ||= { sum: 0, min: +Infinity, minTs: null, max: -Infinity, maxTs: null });
-      col.sum += v;
-      if (v < col.min) { col.min = v; col.minTs = ts; }
-      if (v > col.max) { col.max = v; col.maxTs = ts; }
+  // Fallback: if only a single month like '2025-08' is passed
+  if (!sNorm && !eNorm && args.month) {
+    const m = String(args.month);
+    const mClean = m.replace(/[^0-9]/g, "").slice(0, 6); // YYYYMM
+    if (mClean.length === 6) {
+      return { startDay: mClean + "01", endDay: mClean + "31" };
     }
   }
 
-  const out = {};
-  for (const d of Object.keys(daily)) {
-    out[d] = {};
-    const cnt = daily[d].count;
-    for (const c of Object.keys(daily[d].cols)) {
-      const idx = Number(c);
-      const name = hdr[idx];
-      const col = daily[d].cols[c];
-      out[d][name] = {
-        avg: +(col.sum / cnt).toFixed(3),
-        min: col.min === +Infinity ? null : +col.min.toFixed(3),
-        minTs: col.minTs,
-        max: col.max === -Infinity ? null : +col.max.toFixed(3),
-        maxTs: col.maxTs
-      };
-    }
+  // If we still don’t have anything, try to infer from existing days
+  if ((!sNorm || !eNorm) && allDays && allDays.length) {
+    const sorted = [...allDays].sort();
+    return {
+      startDay: sNorm || normDayStr(sorted[0]),
+      endDay:   eNorm || normDayStr(sorted[sorted.length - 1]),
+    };
   }
-  return { header: hdr, daily: out };
+
+  return { startDay: sNorm, endDay: eNorm };
 }
 
-/* ===========================
-   IrriMAX fetch
-=========================== */
-async function fetchCSV(loggerId, start14, end14, key) {
+/* --------------------- IrriMAX CSV utilities ------------------- */
+async function fetchIrrimaxCsv(loggerId, startTs, endTs) {
+  const key = process.env.PROBE_API_KEY;
+  if (!key) return { error: "Missing PROBE_API_KEY" };
+
+  // default: last 6 months (your design)
+  const now = new Date();
+  const sixMonthsAgo = new Date(now);
+  sixMonthsAgo.setMonth(now.getMonth() - 6);
+
+  const from = startTs || toIrrimax(sixMonthsAgo);
+  const to   = endTs   || toIrrimax(now);
+
   const url =
     `https://www.irrimaxlive.com/api/?cmd=getreadings` +
     `&key=${encodeURIComponent(key)}` +
     `&name=${encodeURIComponent(loggerId)}` +
-    `&from=${start14}&to=${end14}&type=csv`;
+    `&from=${from}&to=${to}`;
+
   console.log("[IrriMAX URL]:", url.replace(key, "***"));
+
   const res = await fetch(url);
-  if (!res.ok) throw new Error(await res.text());
-  return await res.text();
+  if (!res.ok) {
+    const txt = await res.text();
+    return { error: "IrriMAX fetch failed", status: res.status, details: txt };
+  }
+  const csv = await res.text();
+  return { csv };
 }
 
-/* ===========================
-   Tool: single-logger (quick window)
-=========================== */
-async function getProbeData(args = {}, userText = "") {
-  const key = process.env.PROBE_API_KEY;
-  if (!key) return { error: "Missing PROBE_API_KEY" };
-
-  const loggerId = resolveLoggerId({ alias: args.alias, loggerId: args.loggerId, text: userText }) || "25x4gcityw";
-
-  // Default: last 48h unless explicit dates provided
-  const now = new Date();
-  let start14 = normalizeIrrimax(args.start, false);
-  let end14   = normalizeIrrimax(args.end,   true);
-  if (!start14 || !end14) {
-    const back = new Date(now.getTime() - 48*3600*1000);
-    start14 = toIrrimax14(back);
-    end14   = toIrrimax14(now);
-  }
-
-  const csv = await fetchCSV(loggerId, start14, end14, key);
+function parseCsvToRows(csv) {
   const lines = (csv || "").trim().split(/\r?\n/);
-  console.log("[CSV parsed]", Math.max(0, lines.length - 1), "rows");
-  if (lines.length < 2) {
-    return { loggerId, window: { start: start14, end: end14 }, error: "No data in window" };
+  if (lines.length < 2) return { headers: [], rows: [] };
+  const headers = lines[0].split(",");
+  const rows = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(",");
+    if (!parts[0]) continue;
+    const ts = new Date(parts[0]); // IrriMAX “DateTime” is parseable
+    if (isNaN(ts)) continue;
+
+    const rec = { _ts: ts, _day: dayKey(ts) };
+    headers.forEach((h, idx) => (rec[h] = parts[idx]));
+    rows.push(rec);
   }
-
-  const header = lines[0].split(",");
-  const last = lines[lines.length - 1].split(",");
-  const idx = names => names.map(n => header.indexOf(n)).find(i => i !== -1) ?? -1;
-  const timeIdx = idx(["DateTime","Timestamp","Date"]);
-  const t6Idx   = idx(["T-6in_F","T6_F","T_6in_F","Temp6_F","T6(in)_F","Temp_6in_F"]);
-  const battIdx = idx(["Battery_V","Batt_V","Voltage","BatteryV"]);
-  const num = i => (i >= 0 && last[i] != null ? Number(last[i]) : null);
-  const str = i => (i >= 0 && last[i] != null ? String(last[i]) : null);
-
-  return {
-    loggerId,
-    window: { start: start14, end: end14 },
-    latest: {
-      timestamp: str(timeIdx),
-      temp6F: num(t6Idx),
-      voltage: num(battIdx)
-    }
-  };
+  return { headers, rows };
 }
 
-/* ===========================
-   Tool: multi-logger season summary (no caching)
-   - monthly chunking
-   - daily avg/min/max with timestamps
-=========================== */
-async function getMultiProbeSummary(args = {}, userText = "") {
-  const key = process.env.PROBE_API_KEY;
-  if (!key) return { error: "Missing PROBE_API_KEY" };
+// Build daily map with extrema (min/max) and “last” values per day
+function dailyRollupWithExtrema(rows, headers) {
+  const dayMap = {}; // { 'YYYY-MM-DD': { count, lastAt, last:{}, min:{}, max:{} } }
 
-  // Collect logger IDs
-  const ids = new Set();
-  (args.loggerIds || []).forEach(id => { if (id && String(id).trim()) ids.add(String(id).trim()); });
-  (args.aliases || []).forEach(a => {
-    const id = LOGGER_MAP[normKey(a)];
-    if (id) ids.add(id);
-  });
-  if (!ids.size) {
-    // Try detect from user text if none provided
-    const t = (userText || "").toLowerCase();
-    Object.keys(LOGGER_MAP).forEach(k => { if (t.includes(k)) ids.add(LOGGER_MAP[k]); });
-  }
-  if (!ids.size) return { error: "No logger specified" };
+  // Identify columns
+  const isTemp = (h) => /(^|_)T[\w-]*|Temp/i.test(h) && /F$|_F$|Fahrenheit/i.test(h);
+  const isMoist = (h) => /^A[\w-]*|VWC|Moist/i.test(h);
+  const isBatt = (h) => /Batt|Battery|Voltage/i.test(h);
 
-  // Window: default = last 6 months unless start/end provided
-  const now = new Date();
-  let start14 = normalizeIrrimax(args.start, false);
-  let end14   = normalizeIrrimax(args.end,   true);
-  if (!start14 || !end14) {
-    const six = new Date(now); six.setMonth(now.getMonth() - 6);
-    start14 = toIrrimax14(six);
-    end14   = toIrrimax14(now);
-  }
-
-  const S = new Date(
-    +start14.slice(0,4), +start14.slice(4,6)-1, +start14.slice(6,8),
-    +start14.slice(8,10), +start14.slice(10,12), +start14.slice(12,14)
-  );
-  const E = new Date(
-    +end14.slice(0,4), +end14.slice(4,6)-1, +end14.slice(6,8),
-    +end14.slice(8,10), +end14.slice(10,12), +end14.slice(12,14)
+  const wanted = headers.filter(
+    (h) => isTemp(h) || isMoist(h) || isBatt(h)
   );
 
-  const months = monthRanges(S, E);
+  for (const r of rows) {
+    const d = r._day;
+    if (!dayMap[d]) {
+      dayMap[d] = { count: 0, lastAt: 0, last: {}, min: {}, max: {} };
+    }
+    const bucket = dayMap[d];
+    bucket.count++;
 
-  const perLoggerDaily = {}; // loggerId -> { header, daily }
-  for (const lid of ids) {
-    let merged = { header: null, daily: {} };
+    for (const h of wanted) {
+      const n = Number(r[h]);
+      if (!Number.isFinite(n)) continue;
 
-    for (const [mStart, mEnd] of months) {
-      const mS = toIrrimax14(new Date(mStart));
-      const mE = toIrrimax14(new Date(mEnd));
-      const csv = await fetchCSV(lid, mS, mE, key);
-      const rolled = dailyRollupWithExtrema(csv);
-      if (!merged.header && rolled.header) merged.header = rolled.header;
-      Object.assign(merged.daily, rolled.daily);
+      if (!(h in bucket.min) || n < bucket.min[h]) bucket.min[h] = n;
+      if (!(h in bucket.max) || n > bucket.max[h]) bucket.max[h] = n;
     }
 
-    // Clip to requested window (day-granularity)
-    const clipped = {};
-    const startDay = ymd(S);
-    const endDay = ymd(E);
-    Object.keys(merged.daily).forEach(d => {
-      if (d >= startDay && d <= endDay) clipped[d] = merged.daily[d];
-    });
-    perLoggerDaily[lid] = { header: merged.header, daily: clipped };
-  }
-
-  // Highlights example: max daily 6" temp (with timestamp)
-  const CAND_T6 = ["T-6in_F","T6_F","T_6in_F","Temp6_F","T6(in)_F","Temp_6in_F"];
-  const highlights = [];
-  for (const lid of ids) {
-    const entry = perLoggerDaily[lid];
-    if (!entry || !entry.header) continue;
-    const t6name = CAND_T6.find(n => entry.header.includes(n));
-    if (!t6name) continue;
-    let best = { value: -Infinity, date: null, ts: null };
-    for (const d of Object.keys(entry.daily)) {
-      const cell = entry.daily[d][t6name];
-      if (cell && typeof cell.max === "number" && cell.max > best.value) {
-        best = { value: cell.max, date: d, ts: cell.maxTs };
+    const at = r._ts.getTime();
+    if (at >= bucket.lastAt) {
+      bucket.lastAt = at;
+      for (const h of wanted) {
+        bucket.last[h] = Number.isFinite(Number(r[h])) ? Number(r[h]) : r[h];
       }
     }
-    if (best.date) highlights.push({ loggerId: lid, metric: "max_T6F", value: best.value, date: best.date, when: best.ts });
   }
 
+  return dayMap; // keys = 'YYYY-MM-DD'
+}
+
+// Clip a {day: {...}} map by startDay/endDay (accepts dashed or compact)
+// **FIX**: normalize both sides so August/September queries work.
+function clipDailyMap(dailyMap, startDay, endDay) {
+  if (!startDay && !endDay) return dailyMap;
+  const out = {};
+  const sNorm = startDay ? normDayStr(startDay) : null;
+  const eNorm = endDay ? normDayStr(endDay) : null;
+
+  Object.keys(dailyMap).forEach((d) => {
+    const dNorm = normDayStr(d); // handle 'YYYY-MM-DD' vs 'YYYYMMDD'
+    if ((sNorm && dNorm < sNorm) || (eNorm && dNorm > eNorm)) return;
+    out[d] = dailyMap[d];
+  });
+  return out;
+}
+
+/* -------------------------- tool impls ------------------------- */
+async function tool_getProbeData(args = {}) {
+  // Supports single logger id (default your unit)
+  const loggerId = (args.loggerId || "25x4gcityw").trim();
+
+  // If the assistant provided absolute timestamps, pass them through.
+  // (Otherwise we default to last ~6 months in fetchIrrimaxCsv)
+  const fromTs = args.start && /^\d{14}$/.test(args.start) ? args.start : null;
+  const toTs   = args.end   && /^\d{14}$/.test(args.end)   ? args.end   : null;
+
+  const fetched = await fetchIrrimaxCsv(loggerId, fromTs, toTs);
+  if (fetched.error) return fetched;
+
+  const { headers, rows } = parseCsvToRows(fetched.csv);
+  if (!rows.length) {
+    return { loggerId, error: "No rows", details: "CSV returned no data" };
+  }
+  console.log("[CSV parsed]", rows.length, "rows");
+
+  const daily = dailyRollupWithExtrema(rows, headers);
+
+  // Optional clipping by day if the assistant provided a day window.
+  const allDays = Object.keys(daily);
+  const { startDay, endDay } = coerceDayRange(args, allDays);
+  const clipped = clipDailyMap(daily, startDay, endDay);
+
+  // Build compact payload (safe for tool output size)
   return {
-    window: { start: start14, end: end14 },
-    loggers: Array.from(ids),
-    highlights,
-    perLoggerDaily
+    loggerId,
+    dayRange: { startDay, endDay },
+    days: clipped, // { 'YYYY-MM-DD': { count, last:{}, min:{}, max:{} } }
+    columnsNote: "min/max apply per day; last = most recent reading that day",
   };
 }
 
-/* ===========================
-   MAIN HANDLER
-=========================== */
+/* --------------------------- main ------------------------------ */
 exports.handler = async (event) => {
+  // POST only
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method Not Allowed" };
-    }
-  if (!process.env.OPENAI_API_KEY) {
-    return { statusCode: 500, body: JSON.stringify({ error: "Missing OPENAI_API_KEY" }) };
-  }
-  if (!process.env.ASSISTANT_ID) {
-    return { statusCode: 500, body: JSON.stringify({ error: "Missing ASSISTANT_ID" }) };
   }
 
+  // Parse body
   let body = {};
   try { body = JSON.parse(event.body || "{}"); } catch {}
   const message = typeof body.message === "string" ? body.message.trim() : "";
   let thread_id = body.threadId || null;
 
-  if (!message) return { statusCode: 400, body: JSON.stringify({ error: "Empty message" }) };
+  // Ignore empty pings
+  if (!message) return { statusCode: 204, body: "" };
   console.log("[User message]:", message);
 
   const openaiBase = "https://api.openai.com/v1";
 
-  // 1) thread
+  // 1) Create thread if needed
   if (!thread_id) {
-    const tRes = await fetch(`${openaiBase}/threads`, { method: "POST", headers: openaiHeaders() });
+    const tRes = await fetch(`${openaiBase}/threads`, {
+      method: "POST",
+      headers: openaiHeaders(),
+    });
     const tJson = await tRes.json();
     thread_id = tJson.id;
   }
 
-  // 2) add message
+  // 2) Add user message
   const mRes = await fetch(`${openaiBase}/threads/${thread_id}/messages`, {
     method: "POST",
     headers: openaiHeaders(),
@@ -337,22 +259,18 @@ exports.handler = async (event) => {
     return { statusCode: 500, body: JSON.stringify({ error: "Failed to add message", details }) };
   }
 
-  // 3) start run
+  // 3) Start run
   let runRes = await fetch(`${openaiBase}/threads/${thread_id}/runs`, {
     method: "POST",
     headers: openaiHeaders(),
     body: JSON.stringify({ assistant_id: process.env.ASSISTANT_ID }),
   });
-  if (!runRes.ok) {
-    const details = await safeJson(runRes);
-    return { statusCode: 500, body: JSON.stringify({ error: "Failed to start run", details }) };
-  }
   let run = await runRes.json();
 
-  // ---- bounded polling ----
-  const MAX_POLL_MS = 12000;
-  const POLL_EVERY_MS = 600;
-  const t0 = Date.now();
+  // 4) Bounded loop (Netlify 10s-ish budget here)
+  const MAX_POLL_MS = 9000;
+  const POLL_MS = 600;
+  const started = Date.now();
 
   while (!["completed", "failed", "cancelled", "expired"].includes(run.status)) {
     if (run.status === "requires_action") {
@@ -362,35 +280,22 @@ exports.handler = async (event) => {
       for (const c of calls) {
         const fname = c.function?.name;
         const args = JSON.parse(c.function?.arguments || "{}");
-        console.log("[tool-call]", fname, "args:", args);
 
         if (fname === "get_probe_data") {
-          const data = await getProbeData(args, message);
+          const data = await tool_getProbeData(args);
           outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
-
-        } else if (fname === "get_multi_probe_summary") {
-          const data = await getMultiProbeSummary(args, message);
-          outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
-
         } else if (fname === "get_weather_data") {
-          // call your deployed weather function
-          const weatherRes = await fetch(`https://soildataai.netlify.app/.netlify/functions/weather`, {
+          // hand off to your Netlify weather function
+          const wr = await fetch(`https://soildataai.netlify.app/.netlify/functions/weather`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(args)
+            body: JSON.stringify(args),
           });
-          if (!weatherRes.ok) {
-            outputs.push({
-              tool_call_id: c.id,
-              output: JSON.stringify({ error: "Weather API failed", details: await weatherRes.text() })
-            });
+          if (!wr.ok) {
+            outputs.push({ tool_call_id: c.id, output: JSON.stringify({ error: "Weather API failed", details: await wr.text() }) });
           } else {
-            outputs.push({
-              tool_call_id: c.id,
-              output: JSON.stringify(await weatherRes.json())
-            });
+            outputs.push({ tool_call_id: c.id, output: JSON.stringify(await wr.json()) });
           }
-
         } else {
           outputs.push({ tool_call_id: c.id, output: JSON.stringify({ error: "unknown tool" }) });
         }
@@ -405,28 +310,28 @@ exports.handler = async (event) => {
         return { statusCode: 500, body: JSON.stringify({ error: "Failed to submit tool outputs", details }) };
       }
       run = await stoRes.json();
-
     } else {
-      await new Promise(r => setTimeout(r, POLL_EVERY_MS));
+      await new Promise((r) => setTimeout(r, POLL_MS));
       const pollRes = await fetch(`${openaiBase}/threads/${thread_id}/runs/${run.id}`, {
         headers: openaiHeaders(),
       });
       run = await pollRes.json();
     }
 
-    if (Date.now() - t0 > MAX_POLL_MS) {
+    if (Date.now() - started > MAX_POLL_MS) {
+      // Tell the UI to ping again (keeps the widget responsive)
       return {
         statusCode: 200,
         body: JSON.stringify({
           threadId: thread_id,
           response: "Still working on that… try again in a moment.",
-          runStatus: run.status
-        })
+          runStatus: run.status,
+        }),
       };
     }
   }
 
-  // 4) final message
+  // 5) Final assistant message
   const msgRes = await fetch(`${openaiBase}/threads/${thread_id}/messages`, {
     headers: openaiHeaders(),
   });
