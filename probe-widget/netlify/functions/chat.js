@@ -39,9 +39,52 @@ exports.handler = async (event) => {
 
     const apiKey = process.env.PROBE_API_KEY;
     const loggerId = "25x4gcityw";
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const miniModel = "gpt-4o-mini";
 
-    // --- Determine date range dynamically ---
-    let daysBack = 7; // default
+    // ---------------- INTENT DETECTION ----------------
+    const intentPrompt = `
+You are an intent parser for a soil data assistant.
+Read the user's message and respond ONLY in JSON with:
+{
+  "intent": "get_current" | "get_trend" | "smalltalk",
+  "metric": "temperature" | "moisture" | null,
+  "depth": number or null,
+  "period": number of days or null
+}
+User message: "${message}"
+`;
+
+    let intent = { intent: "get_current", metric: null, depth: null, period: null };
+
+    try {
+      const intentRes = await client.responses.create({
+        model: miniModel,
+        input: intentPrompt
+      });
+      const text = intentRes.output[0]?.content[0]?.text || "{}";
+      intent = JSON.parse(text);
+    } catch (e) {
+      console.log("Intent parse failed, using defaults", e.message);
+    }
+
+    console.log("[Intent Detected]:", intent);
+
+    if (intent.intent === "smalltalk") {
+      const friendly = await client.responses.create({
+        model: miniModel,
+        input: `You are Acre Insights' friendly assistant. The user said: "${message}". 
+        Respond conversationally but briefly — one sentence max.`
+      });
+      const text = friendly.output[0]?.content[0]?.text || "Hey there! Ready to check your field data?";
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ response: text })
+      };
+    }
+
+    // ---------------- DATE RANGE ----------------
+    let daysBack = intent.period || 7; // default
     const now = new Date();
 
     const matchDays = msg.match(/past\s+(\d+)\s+day/i);
@@ -66,10 +109,10 @@ exports.handler = async (event) => {
     const { headers, data } = parseCSV(csvText);
     const latest = data[data.length - 1];
 
-    // --- Depth mapping (cm -> inches) ---
+    // ---------------- DEPTH MAP ----------------
     const depthMap = [2, 6, 10, 14, 18, 22, 26, 30, 33, 37, 41, 45];
 
-    // Extract sensor values
+    // ---------------- SENSOR EXTRACTION ----------------
     const temps = headers
       .filter(h => h.startsWith("T"))
       .map((h, i) => ({
@@ -84,16 +127,14 @@ exports.handler = async (event) => {
         val: parseFloat(latest[h] || "0")
       }));
 
-    // --- Detect focus depth ---
+    // ---------------- DETERMINE FOCUS ----------------
     const depthMatch = msg.match(/(\d+)\s*(?:in|inch|inches|")/i);
-    const focusDepth = depthMatch ? parseInt(depthMatch[1]) : null;
+    const focusDepth = intent.depth || (depthMatch ? parseInt(depthMatch[1]) : null);
     console.log("[Focus Depth]:", focusDepth);
 
-    // --- Determine if asking about temperature or moisture ---
-    const wantsTemp = msg.includes("temp");
-    const wantsMoisture = msg.includes("moist");
+    const wantsTemp = intent.metric === "temperature" || msg.includes("temp");
+    const wantsMoisture = intent.metric === "moisture" || msg.includes("moist");
 
-    // --- Format date ---
     const date = new Date(latest["Date Time"]);
     const formattedDate = date.toLocaleString("en-US", {
       month: "long",
@@ -104,7 +145,7 @@ exports.handler = async (event) => {
       hour12: true
     });
 
-    // --- Response builder ---
+    // ---------------- BUILD RESPONSE ----------------
     let response = "";
 
     if (focusDepth) {
@@ -119,7 +160,6 @@ exports.handler = async (event) => {
         response = `**Soil Conditions — ${formattedDate}**\n• ${focusDepth}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
       }
     } else {
-      // All depths
       const lines = depthMap.map((d, i) => {
         const t = temps[i];
         const m = moistures[i];
@@ -130,17 +170,13 @@ exports.handler = async (event) => {
       response = `**Soil ${wantsTemp ? "Temperature" : wantsMoisture ? "Moisture" : "Conditions"} — ${formattedDate}**\n${lines.join("\n")}`;
     }
 
-    // --- Trend or analysis (via GPT) ---
-    if (msg.includes("trend") || msg.includes("change") || msg.includes("over the past")) {
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const miniModel = "gpt-4o-mini";
-
+    // ---------------- TREND ANALYSIS ----------------
+    if (intent.intent === "get_trend") {
       const trendPrompt = `
-You are Acre Insights' probe analysis assistant. 
+You are Acre Insights' probe analysis assistant.
 The user asked: "${message}"
 
 Focus on ${focusDepth ? `${focusDepth}-inch sensor` : "all sensors"}.
-
 Here are readings from the past ${daysBack} days (°F and % moisture):
 ${depthMap.map((d, i) => {
   const t = temps[i], m = moistures[i];
@@ -159,6 +195,7 @@ Analyze trends relevant to the user's query. Respond clearly and concisely.
       response = trendText;
     }
 
+    // ---------------- RETURN ----------------
     return {
       statusCode: 200,
       body: JSON.stringify({ response })
