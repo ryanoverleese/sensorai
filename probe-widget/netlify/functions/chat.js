@@ -8,12 +8,28 @@ const MODEL = "gpt-4o-mini";
 
 // IrriMAX configuration
 const IRRIMAX_KEY = "72c6113e-02bc-42cb-b106-dc4bec979857";
-const IRRIMAX_BASE = "https://www.irrimaxlive.com/api"; // ✅ confirmed working base
+const IRRIMAX_BASE = "https://www.irrimaxlive.com/api";
 const LOGGER = "25x4gcityw";
 
 // ----------------------------
 // HELPERS
 // ----------------------------
+function ok(body) {
+  return {
+    statusCode: 200,
+    headers: { "Content-Type": "text/plain" },
+    body: body,
+  };
+}
+
+function err(body, code = 500) {
+  return {
+    statusCode: code,
+    headers: { "Content-Type": "text/plain" },
+    body: body,
+  };
+}
+
 function parseDepth(text) {
   text = text.toLowerCase();
   const cmMatch = text.match(/(\d+)\s*cm/);
@@ -28,17 +44,14 @@ function parseDepth(text) {
 // MAIN HANDLER
 // ----------------------------
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
-  }
+  if (event.httpMethod !== "POST") return err("Method not allowed", 405);
 
   let body = {};
   try {
     body = JSON.parse(event.body || "{}");
   } catch {}
-  const msg = (body.message || "").toLowerCase();
 
-  if (msg === "__ping") return new Response("__pong", { status: 200 });
+  const msg = (body.message || "").toLowerCase();
 
   try {
     const isTemp = msg.includes("temp");
@@ -48,15 +61,15 @@ exports.handler = async (event) => {
     if (isTemp || isMoisture || wantsBoth) {
       const depthCm = parseDepth(msg);
       const result = await getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg);
-      return new Response(result, { status: 200, headers: { "Content-Type": "text/plain" } });
+      return ok(result);
     }
 
     const ai = await askOpenAI(body.message || "");
-    return new Response(ai, { status: 200, headers: { "Content-Type": "text/plain" } });
+    return ok(ai);
 
   } catch (e) {
     console.error("Chat function error:", e);
-    return new Response("Error: " + String(e), { status: 500 });
+    return err("Error: " + String(e));
   }
 };
 
@@ -73,7 +86,6 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
   const lastRow = lines[lines.length - 1].split(",");
   const timestamp = lastRow[0];
 
-  // --- Robust timestamp parser ---
   let d;
   try {
     const fixedTs = timestamp.replace(/\//g, "-").replace(" ", "T");
@@ -92,7 +104,6 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
   };
   const formattedDate = d.toLocaleString("en-US", options);
 
-  // --- Identify columns ---
   const tempCols = headers
     .filter((h) => /^T\d+\(\d+\)/.test(h))
     .map((h) => ({
@@ -115,8 +126,6 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
     );
 
   let response = "";
-
-  // --- All depths view ---
   const wantsAll = /each|all|every|profile|this morning|today/.test(msg);
 
   if (wantsAll) {
@@ -132,7 +141,7 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
         : isTemp
         ? "Soil Temperatures"
         : "Soil Moisture";
-    response += `${headerLabel} — ${formattedDate}\n`;
+    response += `**${headerLabel} — ${formattedDate}**\n`;
 
     for (const cm of depths) {
       const inch = cmToIn(cm);
@@ -148,12 +157,11 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
       }
     }
   } else {
-    // --- Single depth view ---
     const t = findClosest(tempCols, depthCm);
     const a = findClosest(moistCols, depthCm);
     const inch = cmToIn(depthCm);
 
-    response += `${formattedDate}\n`;
+    response += `**${formattedDate}**\n`;
     if (isTemp && !isMoisture && t) {
       response += `The soil temperature at ${inch}" was ${toF(t.valueC)}°F.`;
     } else if (isMoisture && !isTemp && a) {
@@ -167,7 +175,6 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
     }
   }
 
-  // Clean up formatting for chat window
   return response.trim().replace(/\n{2,}/g, "\n");
 }
 
