@@ -26,7 +26,8 @@ exports.handler = async (event) => {
 
     const apiKey = process.env.PROBE_API_KEY;
     const loggerId = "25x4gcityw";
-    const url = `https://www.irrimaxlive.com/api/?cmd=getgraphvalues&key=${apiKey}&name=${loggerId}`;
+  const url = `https://www.irrimaxlive.com/api/?cmd=getreadings&key=${apiKey}&name=${loggerId}`;
+
 
     const r = await fetch(url);
     const csvText = await r.text();
