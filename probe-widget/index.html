@@ -15,9 +15,48 @@
     .bubble { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.4; font-size:14px; word-break: break-word; white-space:pre-line; }
     .user { background:#e6f2fe; align-self:flex-end; }
     .assistant { background:#f2f2f3; align-self:flex-start; }
-    .row { display:flex; gap:6px; margin-top:6px; }
-    .row input { flex:1; padding:10px; border-radius:10px; border:1px solid #e5e7eb; font-size:14px; }
-    .row button { padding:10px 14px; border:0; border-radius:10px; background:#0ea5e9; color:#fff; font-weight:600; cursor:pointer; font-size:14px; }
+   .row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.row input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  font-size: 14px;
+}
+
+.row button {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 10px;
+  background: #0ea5e9;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+@media (max-width: 600px) {
+  .row {
+    gap: 4px;
+  }
+  .row input {
+    font-size: 13px;
+    padding: 8px;
+  }
+  .row button {
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+}
+
     .row button:disabled { opacity:.6; cursor:not-allowed; }
     .footer { color:#6b7280; font-size:11px; margin-top:6px; text-align:center; }
 
