@@ -15,61 +15,73 @@
     .bubble { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.4; font-size:14px; word-break: break-word; white-space:pre-line; }
     .user { background:#e6f2fe; align-self:flex-end; }
     .assistant { background:#f2f2f3; align-self:flex-start; }
-   .row {
-  display: flex;
-  gap: 6px;
-  flex-wrap: nowrap;
-  align-items: center;
-}
 
-.row input {
-  flex: 1;
-  min-width: 0;
-  padding: 10px;
-  border-radius: 10px;
-  border: 1px solid #e5e7eb;
-  font-size: 14px;
-}
+    .row {
+      display: flex;
+      gap: 6px;
+      flex-wrap: nowrap;
+      align-items: center;
+    }
 
-.row button {
-  flex-shrink: 0;
-  padding: 10px 14px;
-  border: 0;
-  border-radius: 10px;
-  background: #0ea5e9;
-  color: #fff;
-  font-weight: 600;
-  cursor: pointer;
-  font-size: 14px;
-}
+    .row input {
+      flex: 1;
+      min-width: 0;
+      padding: 10px;
+      border-radius: 10px;
+      border: 1px solid #e5e7eb;
+      font-size: 14px;
+    }
 
-@media (max-width: 600px) {
-  .row {
-    gap: 4px;
-  }
-  .row input {
-    font-size: 13px;
-    padding: 8px;
-  }
-  .row button {
-    padding: 8px 10px;
-    font-size: 13px;
-  }
-}
+    .row button {
+      flex-shrink: 0;
+      padding: 10px 14px;
+      border: 0;
+      border-radius: 10px;
+      background: #0ea5e9;
+      color: #fff;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    @media (max-width: 600px) {
+      .row { gap: 4px; }
+      .row input { font-size: 13px; padding: 8px; }
+      .row button { padding: 8px 10px; font-size: 13px; }
+    }
 
     .row button:disabled { opacity:.6; cursor:not-allowed; }
     .footer { color:#6b7280; font-size:11px; margin-top:6px; text-align:center; }
 
-    @media (max-width: 600px) {
-      .wrap { padding: 8px; }
-      .card { padding: 10px; border-radius:10px; }
-      .title { font-size:14px; }
-      #log { max-height: 45vh; }
-      .bubble { padding:7px 9px; font-size:13px; }
-      .row input { padding:9px; font-size:13px; }
-      .row button { padding:9px 12px; font-size:13px; }
-      .footer { font-size:10px; margin-top:4px; }
+    /* --- RAIN DROP LOADER --- */
+    .loader {
+      text-align: center;
+      margin: 12px 0;
+      display: none;
     }
+
+    .raindrop {
+      display: inline-block;
+      width: 14px;
+      height: 22px;
+      margin: 0 6px;
+      background: #5ab3ca;
+      clip-path: path('M7 0 C3 8, 0 14, 7 22 C14 14, 11 8, 7 0 Z');
+      opacity: 0.3;
+      animation: glow 1.5s infinite ease-in-out;
+    }
+
+    .raindrop:nth-child(1) { animation-delay: 0s; }
+    .raindrop:nth-child(2) { animation-delay: 0.2s; }
+    .raindrop:nth-child(3) { animation-delay: 0.4s; }
+    .raindrop:nth-child(4) { animation-delay: 0.6s; }
+    .raindrop:nth-child(5) { animation-delay: 0.8s; }
+
+    @keyframes glow {
+      0%, 100% { opacity: 0.3; transform: translateY(0); }
+      50% { opacity: 1; transform: translateY(-4px); }
+    }
+
   </style>
 </head>
 <body>
@@ -80,6 +92,16 @@
         <div class="title">Probe Assistant</div>
       </div>
       <div id="log" class="column"></div>
+
+      <!-- LOADER -->
+      <div id="loader" class="loader">
+        <div class="raindrop"></div>
+        <div class="raindrop"></div>
+        <div class="raindrop"></div>
+        <div class="raindrop"></div>
+        <div class="raindrop"></div>
+      </div>
+
       <div class="row">
         <input id="msg" type="text" placeholder="Ask me about sensor data..." />
         <button id="send">Send</button>
@@ -92,13 +114,14 @@
     const log = document.getElementById('log');
     const input = document.getElementById('msg');
     const btn = document.getElementById('send');
+    const loader = document.getElementById('loader');
 
     function add(role, text) {
       const div = document.createElement('div');
       div.className = `bubble ${role}`;
       div.innerHTML = text
         .replace(/\n/g, '<br>')
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); // handle bold
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
     }
@@ -109,6 +132,7 @@
       add('user', text);
       input.value = '';
       btn.disabled = true;
+      loader.style.display = 'block'; // show loader
 
       try {
         const r = await fetch('/.netlify/functions/chat', {
@@ -118,12 +142,11 @@
         });
 
         const data = await r.json();
-add('assistant', data.response || JSON.stringify(data, null, 2));
-
-
+        add('assistant', data.response || JSON.stringify(data, null, 2));
       } catch (e) {
         add('assistant', '⚠️ Error: ' + e.message);
       } finally {
+        loader.style.display = 'none'; // hide loader
         btn.disabled = false;
       }
     }
