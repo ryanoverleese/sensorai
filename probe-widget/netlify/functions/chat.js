@@ -6,8 +6,21 @@ const LOGGER_NAME = "25x4gcityw";
 const MODEL = "gpt-4o-mini";
 
 // -------------------- HELPERS --------------------
-const ok = (body) => new Response(body, { status: 200, headers: { "Content-Type": "text/plain" } });
-const err = (msg) => new Response(`Error: ${msg}`, { status: 500 });
+function ok(text) {
+  return {
+    statusCode: 200,
+    headers: { "Content-Type": "text/plain" },
+    body: text
+  };
+}
+
+function err(text) {
+  return {
+    statusCode: 500,
+    headers: { "Content-Type": "text/plain" },
+    body: "Error: " + text
+  };
+}
 
 // convert °C → °F
 const toF = (c) => (c * 9) / 5 + 32;
