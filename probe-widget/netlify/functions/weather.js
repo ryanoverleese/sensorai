@@ -1,321 +1,46 @@
-// netlify/functions/chat.js
-const fetch = require("node-fetch");
-
-// Helper: safe JSON parsing
-async function safeJson(res) {
-  try {
-    return await res.json();
-  } catch (err) {
-    return { error: "Invalid JSON", details: err.message };
-  }
-}
-
-// Helper: standard headers for OpenAI API
-function openaiHeaders() {
-  return {
-    "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-    "Content-Type": "application/json",
-    "OpenAI-Beta": "assistants=v2"
-  };
-}
-
-// ---- Tool Function ----
-async function getProbeData(args) {
-  // Hardcode the logger ID if not provided
-  const loggerId = args.loggerId || "25x4gcityw";
-  let { start, end } = args;
-  const key = process.env.PROBE_API_KEY;
-
-  if (!key) {
-    console.error("[tool:get_probe_data] Missing PROBE_API_KEY");
-    return { error: "Missing API credentials" };
-  }
-
-  // If no date range specified, get last 7 days to avoid huge datasets
-  if (!start && !end) {
-    const now = new Date();
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    
-    // Format as YYYYMMDDHHMMSS
-    start = sevenDaysAgo.toISOString().replace(/[-:T]/g, '').slice(0, 14);
-    end = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
-    console.log("[tool:get_probe_data] Auto date range:", start, "to", end);
-  }
-
-  // Build URL with query parameters per Sentek API docs
-  let url = `https://www.irrimaxlive.com/api/?cmd=getreadings&key=${key}&name=${loggerId}`;
-  
-  // Add date range if provided (format: YYYYMMDDHHMMSS)
-  if (start) {
-    url += `&from=${start}`;
-  }
-  if (end) {
-    url += `&to=${end}`;
-  }
-  
-  console.log("[tool:get_probe_data] URL:", url.replace(key, "***")); // Hide key in logs
-
-  const res = await fetch(url);
-
-  if (!res.ok) {
-    const text = await res.text();
-    console.error("[tool:get_probe_data] FAILED:", res.status, text);
-    return { error: "Failed to fetch probe data", status: res.status, details: text };
-  }
-
-  // The API returns CSV, not JSON
-  const csvData = await res.text();
-  console.log("[tool:get_probe_data] success, received", csvData.length, "characters");
-  
-  // Parse CSV and extract meaningful summary
-  const lines = csvData.split('\n').filter(line => line.trim());
-  
-  if (lines.length < 2) {
-    console.log("[tool:get_probe_data] no data found for date range");
-    return {
-      loggerId: loggerId,
-      error: "No data found for the specified date range",
-      dateRange: { start, end }
-    };
-  }
-  
-  const headers = lines[0];
-  const dataLines = lines.slice(1);
-  
-  console.log("[tool:get_probe_data] parsed", dataLines.length, "data rows");
-  
-  // Get latest reading (last line)
-  const latestLine = dataLines[dataLines.length - 1];
-  const latestValues = latestLine ? latestLine.split(',') : [];
-  
-  // Get first reading for comparison
-  const firstLine = dataLines[0];
-  const firstValues = firstLine ? firstLine.split(',') : [];
-  
-  // Build a summary object with latest temperatures and moisture
-  const headerArray = headers.split(',');
-  const summary = {
-    loggerId: loggerId,
-    dateRange: {
-      start: firstValues[0],
-      end: latestValues[0]
-    },
-    totalReadings: dataLines.length,
-    latestReading: {},
-    headers: headerArray
-  };
-  
-  // Extract temperature (T) and moisture readings from latest
-  headerArray.forEach((header, index) => {
-    if (header.includes('T') || header.includes('A') || header.includes('S')) {
-      summary.latestReading[header] = latestValues[index];
-    }
-  });
-  
-  // Include last 10 readings if dataset is small enough
-  if (dataLines.length <= 100) {
-    summary.recentReadings = dataLines.slice(-10).map(line => {
-      const values = line.split(',');
-      const reading = {};
-      headerArray.forEach((h, i) => {
-        reading[h] = values[i];
-      });
-      return reading;
-    });
-  }
-  
-  console.log("[tool:get_probe_data] summary size:", JSON.stringify(summary).length);
-  
-  return summary;
-}
-
-// ---- Main Handler ----
+// netlify/functions/weather.js
 exports.handler = async (event) => {
-  console.log("--- chat function invoked ---");
+  try {
+    const params = new URLSearchParams(event.queryStringParameters || {});
+    const q = params.get("q") || "Holdrege, NE";
 
-  const { message, threadId } = JSON.parse(event.body || "{}");
-  console.log("Incoming body:", { message, threadId });
+    // Convert simple city name → coordinates (optional)
+    const geoRes = await fetch(
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=1`
+    );
+    const geo = await geoRes.json();
 
-  const openaiBase = "https://api.openai.com/v1";
-  let thread_id = threadId;
-
-  // 1) Create a new thread if needed
-  if (!thread_id) {
-    console.log("[threads] creating...");
-    const tRes = await fetch(`${openaiBase}/threads`, {
-      method: "POST",
-      headers: openaiHeaders(),
-    });
-    const tJson = await tRes.json();
-    thread_id = tJson.id;
-    console.log("[threads] created id:", thread_id);
-  }
-
-  // 2) Add user message
-  console.log("[messages] add user message");
-  const mRes = await fetch(`${openaiBase}/threads/${thread_id}/messages`, {
-    method: "POST",
-    headers: openaiHeaders(),
-    body: JSON.stringify({
-      role: "user",
-      content: message,
-    }),
-  });
-
-  if (!mRes.ok) {
-    const details = await safeJson(mRes);
-    console.error("[messages] add FAILED:", mRes.status, details);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: "Failed to add message", details }),
-    };
-  }
-
-  // 3) Start a run
-  console.log("[runs] starting with assistant_id:", process.env.ASSISTANT_ID);
-  let runRes = await fetch(`${openaiBase}/threads/${thread_id}/runs`, {
-    method: "POST",
-    headers: openaiHeaders(),
-    body: JSON.stringify({
-      assistant_id: process.env.ASSISTANT_ID,
-    }),
-  });
-
-  let run = await runRes.json();
-  console.log("[runs] started id:", run.id, "status:", run.status);
-
-  // ---- Poll and handle tool calls in a unified loop ----
-  let maxIterations = 30; // Prevent infinite loops
-  let iterations = 0;
-  
-  while (run.status !== "completed" && run.status !== "failed" && run.status !== "cancelled" && run.status !== "expired") {
-    iterations++;
-    if (iterations > maxIterations) {
-      console.error("[runs] exceeded max iterations");
+    if (!geo.results || geo.results.length === 0) {
       return {
-        statusCode: 500,
-        body: JSON.stringify({ error: "Run took too long" }),
+        statusCode: 404,
+        body: JSON.stringify({ error: "Location not found" })
       };
     }
 
-    console.log(`[runs] iteration ${iterations}, status: ${run.status}`);
+    const { latitude, longitude, name, country_code } = geo.results[0];
 
-    if (run.status === "requires_action") {
-      const calls = run.required_action?.submit_tool_outputs?.tool_calls || [];
-      console.log("[runs] requires_action with", calls.length, "tool calls");
-      console.log("[runs] full required_action:", JSON.stringify(run.required_action, null, 2));
+    // Fetch current + today’s weather
+    const wxRes = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,precipitation,wind_speed_10m&timezone=America/Chicago`
+    );
+    const wx = await wxRes.json();
 
-      const outputs = [];
-      for (const c of calls) {
-        console.log("[tool-call] name:", c.function?.name, "id:", c.id);
-        
-        if (c.function?.name === "get_probe_data") {
-          const args = JSON.parse(c.function.arguments || "{}");
-          console.log("[tool-call] args:", args);
-          const data = await getProbeData(args);
-          console.log("[tool-call] output:", JSON.stringify(data).slice(0, 500));
-          outputs.push({ tool_call_id: c.id, output: JSON.stringify(data) });
-        } 
-        else if (c.function?.name === "get_weather_data") {
-          const args = JSON.parse(c.function.arguments || "{}");
-          console.log("[tool-call] weather args:", args);
-          
-          // Call the weather function
-          const weatherRes = await fetch(`${process.env.URL}/.netlify/functions/weather`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(args)
-          });
-          
-          const weatherData = await weatherRes.json();
-          console.log("[tool-call] weather output:", JSON.stringify(weatherData).slice(0, 500));
-          outputs.push({ tool_call_id: c.id, output: JSON.stringify(weatherData) });
-        }
-        else {
-          console.log("[tool-call] unknown tool, returning error");
-          outputs.push({
-            tool_call_id: c.id,
-            output: JSON.stringify({ error: "unknown tool" }),
-          });
-        }
-      }
-
-      console.log("[runs] submitting", outputs.length, "tool outputs");
-      const stoRes = await fetch(
-        `${openaiBase}/threads/${thread_id}/runs/${run.id}/submit_tool_outputs`,
-        {
-          method: "POST",
-          headers: openaiHeaders(),
-          body: JSON.stringify({ tool_outputs: outputs }),
-        }
-      );
-
-      if (!stoRes.ok) {
-        const details = await safeJson(stoRes);
-        console.error("[runs] submit_tool_outputs FAILED:", stoRes.status, details);
-        return {
-          statusCode: 500,
-          body: JSON.stringify({
-            error: "Failed to submit tool outputs",
-            details,
-          }),
-        };
-      }
-
-      run = await stoRes.json();
-      console.log("[runs] after submit_tool_outputs status:", run.status);
-    } else if (run.status === "in_progress" || run.status === "queued") {
-      // Wait and poll
-      await new Promise((res) => setTimeout(res, 1500));
-      const pollRes = await fetch(`${openaiBase}/threads/${thread_id}/runs/${run.id}`, {
-        headers: openaiHeaders(),
-      });
-      run = await pollRes.json();
-    } else {
-      console.log("[runs] unexpected status, breaking:", run.status);
-      break;
-    }
-  }
-
-  // ---- Get final message ----
-  const msgRes = await fetch(`${openaiBase}/threads/${thread_id}/messages`, {
-    headers: openaiHeaders(),
-  });
-  
-  if (!msgRes.ok) {
-    const details = await safeJson(msgRes);
-    console.error("[messages] fetch FAILED:", msgRes.status, details);
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        location: `${name}, ${country_code}`,
+        temperature_F: wx.current ? (wx.current.temperature_2m * 9) / 5 + 32 : null,
+        precipitation_mm: wx.current?.precipitation ?? null,
+        wind_mph: wx.current?.wind_speed_10m
+          ? wx.current.wind_speed_10m * 2.23694
+          : null
+      })
+    };
+  } catch (err) {
+    console.error("[weather] error:", err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: "Failed to fetch messages", details }),
+      body: JSON.stringify({ error: "Weather fetch failed", details: err.message })
     };
   }
-  
-  const messages = await msgRes.json();
-  console.log("[messages] full response:", JSON.stringify(messages, null, 2));
-
-  const latest = messages?.data?.[0]?.content?.[0]?.text?.value || "(no reply)";
-  console.log("[messages] latest text:", latest.slice(0, 200));
-  
-  // Check the final run status
-  console.log("[runs] final status:", run.status);
-  if (run.status === "failed") {
-    console.error("[runs] failed with error:", run.last_error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ 
-        error: "Assistant run failed", 
-        details: run.last_error 
-      }),
-    };
-  }
-
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      threadId: thread_id,
-      response: latest,
-      runStatus: run.status,
-    }),
-  };
 };
