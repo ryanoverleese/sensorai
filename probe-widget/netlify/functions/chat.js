@@ -14,22 +14,6 @@ const LOGGER = "25x4gcityw";
 // ----------------------------
 // HELPERS
 // ----------------------------
-function ok(obj) {
-  return {
-    statusCode: 200,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(obj),
-  };
-}
-
-function err(code, obj) {
-  return {
-    statusCode: code,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(obj),
-  };
-}
-
 function parseDepth(text) {
   text = text.toLowerCase();
   const cmMatch = text.match(/(\d+)\s*cm/);
@@ -44,7 +28,9 @@ function parseDepth(text) {
 // MAIN HANDLER
 // ----------------------------
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") return err(405, { error: "Method not allowed" });
+  if (event.httpMethod !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
 
   let body = {};
   try {
@@ -52,7 +38,7 @@ exports.handler = async (event) => {
   } catch {}
   const msg = (body.message || "").toLowerCase();
 
-  if (msg === "__ping") return ok({ ok: true, echo: "__pong" });
+  if (msg === "__ping") return new Response("__pong", { status: 200 });
 
   try {
     const isTemp = msg.includes("temp");
@@ -62,15 +48,15 @@ exports.handler = async (event) => {
     if (isTemp || isMoisture || wantsBoth) {
       const depthCm = parseDepth(msg);
       const result = await getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg);
-      return ok({ threadId: null, response: result, runStatus: "completed" });
+      return new Response(result, { status: 200, headers: { "Content-Type": "text/plain" } });
     }
 
     const ai = await askOpenAI(body.message || "");
-    return ok({ threadId: null, response: ai, runStatus: "completed" });
+    return new Response(ai, { status: 200, headers: { "Content-Type": "text/plain" } });
 
   } catch (e) {
     console.error("Chat function error:", e);
-    return err(502, { error: "Chat function error", detail: String(e) });
+    return new Response("Error: " + String(e), { status: 500 });
   }
 };
 
@@ -146,7 +132,7 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
         : isTemp
         ? "Soil Temperatures"
         : "Soil Moisture";
-    response += `**${headerLabel} — ${formattedDate}**\n`;
+    response += `${headerLabel} — ${formattedDate}\n`;
 
     for (const cm of depths) {
       const inch = cmToIn(cm);
@@ -167,7 +153,7 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
     const a = findClosest(moistCols, depthCm);
     const inch = cmToIn(depthCm);
 
-    response += `**${formattedDate}**\n`;
+    response += `${formattedDate}\n`;
     if (isTemp && !isMoisture && t) {
       response += `The soil temperature at ${inch}" was ${toF(t.valueC)}°F.`;
     } else if (isMoisture && !isTemp && a) {
@@ -216,6 +202,7 @@ async function askOpenAI(userMsg) {
     const data = await r.json();
     if (!r.ok) throw new Error(data?.error?.message || `OpenAI error ${r.status}`);
     return data?.choices?.[0]?.message?.content || "";
+
   } finally {
     clearTimeout(timeout);
   }
