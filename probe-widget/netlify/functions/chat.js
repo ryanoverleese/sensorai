@@ -42,12 +42,35 @@ exports.handler = async (event) => {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // ---------------- DATE RANGE LOGIC ----------------
-    let daysBack = 7;
-    if (msg.includes("past month")) daysBack = 30;
-    const matchDays = msg.match(/past\s+(\d+)\s+day/i);
-    if (matchDays) daysBack = parseInt(matchDays[1]);
-
+    let daysBack = 7; // default 7 days
     const now = new Date();
+
+    // Support "past X days/weeks/months"
+    const matchDays = msg.match(/past\s+(\d+)\s*day/i);
+    const matchWeeks = msg.match(/past\s+(\d+)\s*week/i);
+    const matchMonths = msg.match(/past\s+(\d+)\s*month/i);
+
+    if (matchDays) daysBack = parseInt(matchDays[1]);
+    else if (matchWeeks) daysBack = parseInt(matchWeeks[1]) * 7;
+    else if (matchMonths) daysBack = parseInt(matchMonths[1]) * 30;
+    else if (msg.includes("past week")) daysBack = 7;
+    else if (msg.includes("past two weeks")) daysBack = 14;
+    else if (msg.includes("past month")) daysBack = 30;
+
+    // Support "since <month> <day>" or "since June"
+    const sinceMatch = msg.match(/since\s+([a-zA-Z]+)\s*(\d{1,2})?/);
+    if (sinceMatch) {
+      const monthName = sinceMatch[1];
+      const dayNum = sinceMatch[2] ? parseInt(sinceMatch[2]) : 1;
+      const startDateGuess = new Date(`${monthName} ${dayNum}, ${now.getFullYear()}`);
+      if (!isNaN(startDateGuess)) {
+        daysBack = Math.floor((now - startDateGuess) / (1000 * 60 * 60 * 24));
+      }
+    }
+
+    // Safety cap: limit to 120 days max for performance
+    if (daysBack > 120) daysBack = 120;
+
     const startDate = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
     const from = fmtDateTime(startDate);
     const to = fmtDateTime(now);
@@ -84,13 +107,14 @@ exports.handler = async (event) => {
         values: data.map(d => parseFloat(d[h] || "0"))
       }));
 
-    // Create a short summary string for GPT
+    // Create a summary string for GPT
     const summary = depthMap.map((d, i) => {
       const tVals = temps[i]?.values || [];
       const mVals = moistures[i]?.values || [];
-      const lastT = toF(tVals[tVals.length - 1]).toFixed(0);
+      if (!tVals.length || !mVals.length) return "";
+      const lastT = toF(tVals[tVals.length - 1]).toFixed(1);
       const lastM = mVals[mVals.length - 1]?.toFixed(1);
-      const avgT = toF(tVals.reduce((a, b) => a + b, 0) / tVals.length).toFixed(0);
+      const avgT = toF(tVals.reduce((a, b) => a + b, 0) / tVals.length).toFixed(1);
       const avgM = (mVals.reduce((a, b) => a + b, 0) / mVals.length).toFixed(1);
       return `${d}" — latest ${lastT}°F, ${lastM}% moisture; avg ${avgT}°F, ${avgM}% moisture`;
     }).join("\n");
