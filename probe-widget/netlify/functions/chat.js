@@ -6,9 +6,9 @@ const fetch = require("node-fetch");
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const MODEL = "gpt-4o-mini";
 
-// Your IrriMAX settings:
+// IrriMAX configuration
 const IRRIMAX_KEY = "72c6113e-02bc-42cb-b106-dc4bec979857";
-const IRRIMAX_BASE = "https://www.irrimaxlive.com/api";
+const IRRIMAX_BASE = "https://www.irrimaxlive.com/api"; // ✅ confirmed working base (no trailing slash)
 const LOGGER = "25x4gcityw";
 
 // ----------------------------
@@ -30,35 +30,14 @@ function err(code, obj) {
   };
 }
 
-function toF(c) {
-  return (c * 9) / 5 + 32;
-}
-
 function parseDepth(text) {
   text = text.toLowerCase();
   const cmMatch = text.match(/(\d+)\s*cm/);
   const inchMatch = text.match(/(\d+)\s*(in|inch|inches)/);
-  let depthCm = 15; // default ≈ 6 inch
+  let depthCm = 15; // default ≈ 6"
   if (cmMatch) depthCm = parseInt(cmMatch[1]);
   if (inchMatch) depthCm = parseInt(inchMatch[1]) * 2.54;
   return depthCm;
-}
-
-function findClosestColumn(headers, type, depthCm) {
-  // type = "T" (temperature) or "A" (moisture)
-  const cols = headers
-    .filter(h => new RegExp(`^${type}\\d+\\(\\d+\\)`).test(h))
-    .map(h => ({
-      name: h,
-      depth: parseInt(h.match(/\((\d+)\)/)?.[1] || 0)
-    }));
-  if (!cols.length) return null;
-  let closest = cols[0];
-  for (const col of cols) {
-    if (Math.abs(col.depth - depthCm) < Math.abs(closest.depth - depthCm))
-      closest = col;
-  }
-  return closest;
 }
 
 // ----------------------------
@@ -74,16 +53,18 @@ exports.handler = async (event) => {
   if (msg === "__ping") return ok({ ok: true, echo: "__pong" });
 
   try {
-    // Determine intent
-    if (msg.includes("soil") || msg.includes("temp") || msg.includes("moisture")) {
+    // Detect whether they asked for temp or moisture
+    const isTemp = msg.includes("temp");
+    const isMoisture = msg.includes("moisture") || msg.includes("vwc");
+    const wantsBoth = isTemp && isMoisture;
+
+    if (isTemp || isMoisture || wantsBoth) {
       const depthCm = parseDepth(msg);
-      const isTemp = msg.includes("temp");
-      const isMoisture = msg.includes("moisture") || msg.includes("vwc");
-      const result = await getSoilReading(depthCm, isTemp, isMoisture);
+      const result = await getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth);
       return ok({ threadId: null, response: result, runStatus: "completed" });
     }
 
-    // Default fallback to AI
+    // Default fallback to OpenAI for non-data questions
     const ai = await askOpenAI(body.message || "");
     return ok({ threadId: null, response: ai, runStatus: "completed" });
 
@@ -94,9 +75,9 @@ exports.handler = async (event) => {
 };
 
 // ----------------------------
-// DATA FETCH + PARSE
+// DATA PARSER
 // ----------------------------
-async function getSoilReading(depthCm, isTemp, isMoisture) {
+async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth) {
   const url = `${IRRIMAX_BASE}?cmd=getreadings&key=${IRRIMAX_KEY}&name=${LOGGER}`;
   const r = await fetch(url);
   const csv = await r.text();
@@ -106,26 +87,79 @@ async function getSoilReading(depthCm, isTemp, isMoisture) {
   const lastRow = lines[lines.length - 1].split(",");
   const timestamp = lastRow[0];
 
-  // Select column type
-  let type = "T";
-  if (isMoisture) type = "A";
+  // Format timestamp nicely
+  const d = new Date(timestamp.replace(" ", "T"));
+  const options = { year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" };
+  const formattedDate = d.toLocaleString("en-US", options);
 
-  const colInfo = findClosestColumn(headers, type, depthCm);
-  if (!colInfo) throw new Error(`No ${type} columns found`);
+  // Identify all temperature and moisture columns
+  const tempCols = headers
+    .filter(h => /^T\d+\(\d+\)/.test(h))
+    .map(h => ({
+      name: h,
+      depthCm: parseInt(h.match(/\((\d+)\)/)?.[1] || 0),
+      valueC: parseFloat(lastRow[headers.indexOf(h)]),
+    }));
 
-  const idx = headers.indexOf(colInfo.name);
-  const value = parseFloat(lastRow[idx]);
+  const moistCols = headers
+    .filter(h => /^A\d+\(\d+\)/.test(h))
+    .map(h => ({
+      name: h,
+      depthCm: parseInt(h.match(/\((\d+)\)/)?.[1] || 0),
+      valuePct: parseFloat(lastRow[headers.indexOf(h)]),
+    }));
 
-  // Build human-readable depth label
-  const depthIn = depthCm / 2.54;
-  const label = `${colInfo.depth} cm (${depthIn.toFixed(1)} in)`;
+  // Utility conversions
+  const cmToIn = cm => Math.round(cm / 2.54);
+  const toF = c => Math.round((c * 9) / 5 + 32);
 
-  if (type === "T") {
-    const valueF = toF(value);
-    return `At ${timestamp}, the soil temperature at ${label} was ${value.toFixed(1)} °C (${valueF.toFixed(1)} °F).`;
+  // Helper to find nearest depth
+  const findClosest = (cols, targetCm) => {
+    if (!cols.length) return null;
+    let closest = cols[0];
+    for (const c of cols) {
+      if (Math.abs(c.depthCm - targetCm) < Math.abs(closest.depthCm - targetCm)) closest = c;
+    }
+    return closest;
+  };
+
+  let response = `As of ${formattedDate}:\n`;
+
+  // Determine if they want all depths or just one
+  const wantsAll = /each|all|every|profile/.test((isTemp || isMoisture) ? "each" : "");
+
+  if (wantsAll) {
+    // Show readings for all depths
+    const depths = [...new Set([...tempCols.map(c => c.depthCm), ...moistCols.map(c => c.depthCm)])].sort((a, b) => a - b);
+    for (const cm of depths) {
+      const inch = cmToIn(cm);
+      const t = tempCols.find(c => c.depthCm === cm);
+      const a = moistCols.find(c => c.depthCm === cm);
+      if (isTemp && !isMoisture && t) {
+        response += `• ${inch}" — ${toF(t.valueC)}°F\n`;
+      } else if (isMoisture && !isTemp && a) {
+        response += `• ${inch}" — ${a.valuePct.toFixed(1)}%\n`;
+      } else if (wantsBoth && t && a) {
+        response += `• ${inch}" — ${toF(t.valueC)}°F, ${a.valuePct.toFixed(1)}%\n`;
+      }
+    }
   } else {
-    return `At ${timestamp}, the volumetric water content (moisture) at ${label} was ${value.toFixed(2)}%.`;
+    // Single depth lookup
+    const t = findClosest(tempCols, depthCm);
+    const a = findClosest(moistCols, depthCm);
+    const inch = cmToIn(depthCm);
+    if (isTemp && !isMoisture && t) {
+      response += `The soil temperature at ${inch}" was ${toF(t.valueC)}°F.`;
+    } else if (isMoisture && !isTemp && a) {
+      response += `The soil moisture at ${inch}" was ${a.valuePct.toFixed(1)}%.`;
+    } else if (wantsBoth && t && a) {
+      response += `At ${inch}", the soil temperature was ${toF(t.valueC)}°F and the moisture was ${a.valuePct.toFixed(1)}%.`;
+    } else {
+      response += "I couldn’t find matching data for that depth.";
+    }
   }
+
+  return response.trim();
 }
 
 // ----------------------------
