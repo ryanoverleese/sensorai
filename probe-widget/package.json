@@ -1,5 +1,8 @@
 {
+  "name": "probe-widget",
+  "version": "1.0.0",
   "dependencies": {
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.7",
+    "openai": "^4.0.0"
   }
 }
