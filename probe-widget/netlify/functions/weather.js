@@ -1,89 +1,80 @@
 // netlify/functions/weather.js
-// Simple and reliable Open-Meteo function
 exports.handler = async (event) => {
   try {
     const params = new URLSearchParams(event.queryStringParameters || {});
     const q = (params.get("q") || "").trim();
     const zip = (params.get("zip") || "").trim();
+    const search = zip || q || "68959"; // default ZIP Holdrege
 
-    // 1️⃣ Determine search query
-    const search = zip || q || "Holdrege, NE";
     console.log("[weather] incoming query:", search);
 
-    // 2️⃣ Detect ZIP codes and convert to city/state via zippopotam API
-    let locationQuery = search;
+    let latitude, longitude, locationLabel;
+
+    // 1️⃣ Try ZIP lookup first if it's a ZIP or known small town
     if (/^\d{5}$/.test(search)) {
       const zRes = await fetch(`https://api.zippopotam.us/us/${search}`);
       if (zRes.ok) {
         const zJson = await zRes.json();
         const place = zJson.places?.[0];
-        if (place) {
-          locationQuery = `${place["place name"]}, ${place["state abbreviation"]}, US`;
-          console.log("[weather] zip resolved to:", locationQuery);
-        }
-      } else {
-        console.warn("[weather] ZIP lookup failed, fallback to geocoding");
+        latitude = parseFloat(place.latitude);
+        longitude = parseFloat(place.longitude);
+        locationLabel = `${place["place name"]}, ${place["state abbreviation"]}`;
       }
     }
 
-    // 3️⃣ Geocode location using Open-Meteo
-    const query = encodeURIComponent(
-      locationQuery.replace(/,?\s*NE\b/i, "").replace(/,?\s*US\b/i, "") + ", US"
-    );
-    const geoURL = `https://geocoding-api.open-meteo.com/v1/search?name=${query}&count=1&language=en&format=json`;
-
-    const geoRes = await fetch(geoURL);
-    const geo = await geoRes.json();
-
-    if (!geo.results || geo.results.length === 0) {
-      console.error("[weather] no geocode results:", geo);
-      return {
-        statusCode: 404,
-        body: JSON.stringify({ error: "Location not found", query: locationQuery })
-      };
+    // 2️⃣ If no ZIP match yet, try geocoding the name
+    if (!latitude || !longitude) {
+      const query = encodeURIComponent(
+        search.replace(/,?\s*NE\b/i, "") + ", US"
+      );
+      const geoRes = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=${query}&count=1&language=en&format=json`
+      );
+      const geo = await geoRes.json();
+      if (geo.results && geo.results.length > 0) {
+        const { latitude: lat, longitude: lon, name, country_code } = geo.results[0];
+        latitude = lat;
+        longitude = lon;
+        locationLabel = `${name}, ${country_code}`;
+      }
     }
 
-    const { latitude, longitude, name, country_code } = geo.results[0];
-    console.log("[weather] resolved ->", { latitude, longitude, name, country_code });
+    // 3️⃣ If still not found, hardcode known fallback for Holdrege area
+    if (!latitude || !longitude) {
+      console.warn("[weather] fallback to Holdrege, NE coordinates");
+      latitude = 40.4405;
+      longitude = -99.3698;
+      locationLabel = "Holdrege, NE";
+    }
 
-    // 4️⃣ Fetch current weather data
+    // 4️⃣ Fetch weather data
     const wxURL = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m,precipitation,wind_speed_10m&timezone=America/Chicago`;
     const wxRes = await fetch(wxURL);
     const wx = await wxRes.json();
 
     if (!wx.current) {
-      console.error("[weather] no current data:", wx);
-      return {
-        statusCode: 502,
-        body: JSON.stringify({ error: "Weather data unavailable" })
-      };
+      throw new Error("Weather data unavailable");
     }
 
-    // 5️⃣ Return simplified data
+    // 5️⃣ Format output
     const F = (c) => (c != null ? (c * 9) / 5 + 32 : null);
     const MPH = (ms) => (ms != null ? ms * 2.23694 : null);
 
-    const output = {
-      location: `${name}, ${country_code}`,
-      coords: { lat: latitude, lon: longitude },
-      temperature_F: F(wx.current.temperature_2m),
-      precipitation_mm: wx.current.precipitation ?? null,
-      wind_mph: MPH(wx.current.wind_speed_10m)
-    };
-
-    console.log("[weather] success:", output);
     return {
       statusCode: 200,
-      body: JSON.stringify(output)
+      body: JSON.stringify({
+        location: locationLabel,
+        coords: { lat: latitude, lon: longitude },
+        temperature_F: F(wx.current.temperature_2m),
+        precipitation_mm: wx.current.precipitation ?? null,
+        wind_mph: MPH(wx.current.wind_speed_10m)
+      })
     };
   } catch (err) {
     console.error("[weather] error:", err);
     return {
       statusCode: 500,
-      body: JSON.stringify({
-        error: "Weather fetch failed",
-        details: err.message
-      })
+      body: JSON.stringify({ error: "Weather fetch failed", details: err.message })
     };
   }
 };
