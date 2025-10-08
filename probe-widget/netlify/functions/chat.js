@@ -8,7 +8,7 @@ const MODEL = "gpt-4o-mini";
 
 // IrriMAX configuration
 const IRRIMAX_KEY = "72c6113e-02bc-42cb-b106-dc4bec979857";
-const IRRIMAX_BASE = "https://www.irrimaxlive.com/api"; // ✅ confirmed working base (no trailing slash)
+const IRRIMAX_BASE = "https://www.irrimaxlive.com/api"; // ✅ confirmed working base
 const LOGGER = "25x4gcityw";
 
 // ----------------------------
@@ -47,13 +47,14 @@ exports.handler = async (event) => {
   if (event.httpMethod !== "POST") return err(405, { error: "Method not allowed" });
 
   let body = {};
-  try { body = JSON.parse(event.body || "{}"); } catch {}
+  try {
+    body = JSON.parse(event.body || "{}");
+  } catch {}
   const msg = (body.message || "").toLowerCase();
 
   if (msg === "__ping") return ok({ ok: true, echo: "__pong" });
 
   try {
-    // Detect whether they asked for temp or moisture
     const isTemp = msg.includes("temp");
     const isMoisture = msg.includes("moisture") || msg.includes("vwc");
     const wantsBoth = isTemp && isMoisture;
@@ -64,7 +65,6 @@ exports.handler = async (event) => {
       return ok({ threadId: null, response: result, runStatus: "completed" });
     }
 
-    // Default fallback to OpenAI for non-data questions
     const ai = await askOpenAI(body.message || "");
     return ok({ threadId: null, response: ai, runStatus: "completed" });
 
@@ -75,7 +75,7 @@ exports.handler = async (event) => {
 };
 
 // ----------------------------
-// DATA PARSER
+// SOIL DATA PARSER
 // ----------------------------
 async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth) {
   const url = `${IRRIMAX_BASE}?cmd=getreadings&key=${IRRIMAX_KEY}&name=${LOGGER}`;
@@ -87,54 +87,72 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth) {
   const lastRow = lines[lines.length - 1].split(",");
   const timestamp = lastRow[0];
 
-  // Format timestamp nicely
-  const d = new Date(timestamp.replace(" ", "T"));
-  const options = { year: "numeric", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" };
+  // --- Robust timestamp parser ---
+  let d;
+  try {
+    const fixedTs = timestamp.replace(/\//g, "-").replace(" ", "T");
+    d = new Date(fixedTs);
+    if (isNaN(d)) throw new Error("Invalid");
+  } catch {
+    d = new Date();
+  }
+
+  const options = {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  };
   const formattedDate = d.toLocaleString("en-US", options);
 
-  // Identify all temperature and moisture columns
+  // --- Identify columns ---
   const tempCols = headers
-    .filter(h => /^T\d+\(\d+\)/.test(h))
-    .map(h => ({
-      name: h,
+    .filter((h) => /^T\d+\(\d+\)/.test(h))
+    .map((h) => ({
       depthCm: parseInt(h.match(/\((\d+)\)/)?.[1] || 0),
       valueC: parseFloat(lastRow[headers.indexOf(h)]),
     }));
 
   const moistCols = headers
-    .filter(h => /^A\d+\(\d+\)/.test(h))
-    .map(h => ({
-      name: h,
+    .filter((h) => /^A\d+\(\d+\)/.test(h))
+    .map((h) => ({
       depthCm: parseInt(h.match(/\((\d+)\)/)?.[1] || 0),
       valuePct: parseFloat(lastRow[headers.indexOf(h)]),
     }));
 
-  // Utility conversions
-  const cmToIn = cm => Math.round(cm / 2.54);
-  const toF = c => Math.round((c * 9) / 5 + 32);
+  const cmToIn = (cm) => Math.round(cm / 2.54);
+  const toF = (c) => Math.round((c * 9) / 5 + 32);
+  const findClosest = (cols, targetCm) =>
+    cols.reduce((a, b) =>
+      Math.abs(b.depthCm - targetCm) < Math.abs(a.depthCm - targetCm) ? b : a
+    );
 
-  // Helper to find nearest depth
-  const findClosest = (cols, targetCm) => {
-    if (!cols.length) return null;
-    let closest = cols[0];
-    for (const c of cols) {
-      if (Math.abs(c.depthCm - targetCm) < Math.abs(closest.depthCm - targetCm)) closest = c;
-    }
-    return closest;
-  };
+  let response = "";
 
-  let response = `As of ${formattedDate}:\n`;
-
-  // Determine if they want all depths or just one
-  const wantsAll = /each|all|every|profile/.test((isTemp || isMoisture) ? "each" : "");
+  // --- All depths view ---
+  const wantsAll = /each|all|every|profile|this morning|today/.test(msg);
 
   if (wantsAll) {
-    // Show readings for all depths
-    const depths = [...new Set([...tempCols.map(c => c.depthCm), ...moistCols.map(c => c.depthCm)])].sort((a, b) => a - b);
+    const depths = [
+      ...new Set([
+        ...tempCols.map((c) => c.depthCm),
+        ...moistCols.map((c) => c.depthCm),
+      ]),
+    ].sort((a, b) => a - b);
+    const headerLabel =
+      isTemp && isMoisture
+        ? "Soil Temp & Moisture"
+        : isTemp
+        ? "Soil Temperatures"
+        : "Soil Moisture";
+    response += `**${headerLabel} — ${formattedDate}**\n`;
+
     for (const cm of depths) {
       const inch = cmToIn(cm);
-      const t = tempCols.find(c => c.depthCm === cm);
-      const a = moistCols.find(c => c.depthCm === cm);
+      const t = tempCols.find((c) => c.depthCm === cm);
+      const a = moistCols.find((c) => c.depthCm === cm);
+
       if (isTemp && !isMoisture && t) {
         response += `• ${inch}" — ${toF(t.valueC)}°F\n`;
       } else if (isMoisture && !isTemp && a) {
@@ -144,22 +162,27 @@ async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth) {
       }
     }
   } else {
-    // Single depth lookup
+    // --- Single depth view ---
     const t = findClosest(tempCols, depthCm);
     const a = findClosest(moistCols, depthCm);
     const inch = cmToIn(depthCm);
+
+    response += `**${formattedDate}**\n`;
     if (isTemp && !isMoisture && t) {
       response += `The soil temperature at ${inch}" was ${toF(t.valueC)}°F.`;
     } else if (isMoisture && !isTemp && a) {
       response += `The soil moisture at ${inch}" was ${a.valuePct.toFixed(1)}%.`;
     } else if (wantsBoth && t && a) {
-      response += `At ${inch}", the soil temperature was ${toF(t.valueC)}°F and the moisture was ${a.valuePct.toFixed(1)}%.`;
+      response += `At ${inch}", the soil temperature was ${toF(
+        t.valueC
+      )}°F and the moisture was ${a.valuePct.toFixed(1)}%.`;
     } else {
       response += "I couldn’t find matching data for that depth.";
     }
   }
 
-  return response.trim();
+  // Clean up formatting for chat window
+  return response.trim().replace(/\n{2,}/g, "\n");
 }
 
 // ----------------------------
@@ -174,13 +197,17 @@ async function askOpenAI(userMsg) {
       method: "POST",
       signal: controller.signal,
       headers: {
-        "Authorization": `Bearer ${OPENAI_KEY}`,
+        Authorization: `Bearer ${OPENAI_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: MODEL,
         messages: [
-          { role: "system", content: "You are a helpful agronomy assistant that interprets soil probe data from IrriMAX Live." },
+          {
+            role: "system",
+            content:
+              "You are a helpful agronomy assistant that interprets soil probe data from IrriMAX Live.",
+          },
           { role: "user", content: userMsg },
         ],
       }),
@@ -189,7 +216,6 @@ async function askOpenAI(userMsg) {
     const data = await r.json();
     if (!r.ok) throw new Error(data?.error?.message || `OpenAI error ${r.status}`);
     return data?.choices?.[0]?.message?.content || "";
-
   } finally {
     clearTimeout(timeout);
   }
