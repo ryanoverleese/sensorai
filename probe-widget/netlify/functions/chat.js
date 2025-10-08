@@ -107,6 +107,10 @@ exports.handler = async (event) => {
       method: "POST",
       headers: openaiHeaders(),
     });
+    if (!tRes.ok) {
+      const details = await safeJson(tRes);
+      return { statusCode: 500, body: JSON.stringify({ error: "Failed to create thread", details }) };
+    }
     const tJson = await tRes.json();
     thread_id = tJson.id;
   }
@@ -128,14 +132,30 @@ exports.handler = async (event) => {
     headers: openaiHeaders(),
     body: JSON.stringify({ assistant_id: process.env.ASSISTANT_ID }),
   });
+  if (!runRes.ok) {
+    const details = await safeJson(runRes);
+    return { statusCode: 500, body: JSON.stringify({ error: "Failed to create run", details }) };
+  }
   let run = await runRes.json();
 
-  // ---- bounded polling loop (avoid 60s Netlify kill) ----
-  const MAX_POLL_MS = 9000;
-  const POLL_EVERY_MS = 600;
+  // ---- bounded polling loop ----
+  const MAX_POLL_MS = 50000;  // 50 seconds max
+  const POLL_EVERY_MS = 1000;
   const t0 = Date.now();
 
   while (!["completed", "failed", "cancelled", "expired"].includes(run.status)) {
+    // Check timeout FIRST before doing anything
+    if (Date.now() - t0 > MAX_POLL_MS) {
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          threadId: thread_id,
+          response: "Still processing... Please send another message to continue.",
+          runStatus: run.status
+        })
+      };
+    }
+
     if (run.status === "requires_action") {
       const calls = run.required_action?.submit_tool_outputs?.tool_calls || [];
       const outputs = [];
@@ -156,7 +176,7 @@ exports.handler = async (event) => {
           if (!weatherRes.ok) {
             outputs.push({
               tool_call_id: c.id,
-              output: JSON.stringify({ error: "Weather API failed", details: await weatherRes.text() })
+              output: JSON.stringify({ error: "Weather API failed" })
             });
           } else {
             outputs.push({
@@ -185,17 +205,6 @@ exports.handler = async (event) => {
         headers: openaiHeaders(),
       });
       run = await pollRes.json();
-    }
-
-    if (Date.now() - t0 > MAX_POLL_MS) {
-      return {
-        statusCode: 200,
-        body: JSON.stringify({
-          threadId: thread_id,
-          response: "Still working on that… try again in a moment.",
-          runStatus: run.status
-        })
-      };
     }
   }
 
