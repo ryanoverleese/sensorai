@@ -1,3 +1,6 @@
+No, my bad! Here’s the **complete HTML file**:
+
+```html
 <!doctype html>
 <html lang="en">
 <head>
@@ -12,7 +15,7 @@
     .dot { width:8px; height:8px; border-radius:50%; background:#0ea5e9; }
     .title { font-weight:700; font-size:16px; }
     #log { max-height: 50vh; overflow:auto; padding:6px 0; }
-    .bubble { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.3; font-size:14px; }
+    .bubble { padding:8px 10px; border-radius:10px; margin:6px 0; line-height:1.3; font-size:14px; word-break: break-word; }
     .user { background:#e6f2fe; align-self:flex-end; }
     .assistant { background:#f2f2f3; }
     .row { display:flex; gap:6px; }
@@ -21,7 +24,6 @@
     .row button:disabled { opacity:.6; cursor:not-allowed; }
     .footer { color:#6b7280; font-size:11px; margin-top:6px; text-align:center; }
     
-    /* Mobile optimizations */
     @media (max-width: 600px) {
       .wrap { padding: 8px; }
       .card { padding: 10px; border-radius:10px; }
@@ -51,6 +53,7 @@
     const input = document.getElementById('msg');
     const btn = document.getElementById('send');
     let threadId = null;
+    
     function add(role, text) {
       const div = document.createElement('div');
       div.className = `bubble ${role}`;
@@ -58,27 +61,34 @@
       log.appendChild(div);
       log.scrollTop = log.scrollHeight;
     }
+    
     async function send() {
       const text = input.value.trim();
       if (!text) return;
       add('user', text);
       input.value = '';
       btn.disabled = true;
+      
       try {
         const r = await fetch('/.netlify/functions/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text, threadId })
         });
+        
         const data = await r.json();
         threadId = data.threadId || threadId;
-        add('assistant', data.response || '(no reply)');
+        
+        // Show full response including errors
+        add('assistant', JSON.stringify(data, null, 2));
+        
       } catch (e) {
-        add('assistant', 'Error contacting assistant.');
+        add('assistant', 'Error: ' + e.message);
       } finally {
         btn.disabled = false;
       }
     }
+    
     btn.addEventListener('click', send);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') send();
@@ -86,3 +96,5 @@
   </script>
 </body>
 </html>
+
+
