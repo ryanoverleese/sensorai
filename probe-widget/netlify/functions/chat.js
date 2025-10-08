@@ -14,7 +14,7 @@ function parseCSV(csv) {
   return { headers, data };
 }
 
-function toF(c) {
+function safeToF(c) {
   const n = parseFloat(c);
   if (isNaN(n)) return null;
   return (n * 9) / 5 + 32;
@@ -60,39 +60,47 @@ exports.handler = async (event) => {
     const { headers, data } = parseCSV(csvText);
     console.log(`[CSV parsed] ${data.length} rows`);
 
-    // ---- Compress the data (keep every 12h or so) ----
-    const step = Math.max(1, Math.floor(data.length / 360)); // about 180 days * 2/day
+    // ---- Compress the data ----
+    const step = Math.max(1, Math.floor(data.length / 360));
     const reduced = data.filter((_, i) => i % step === 0);
 
     // ---- Depth mapping (cm -> inches) ----
     const depthMap = [2, 6, 10, 14, 18, 22, 26, 30, 33, 37, 41, 45];
 
-    // ---- Build compact history string ----
+    // ---- Build compact history ----
     const compactHistory = reduced.map(row => {
       const dt = row["Date Time"];
       const temps = headers
         .filter(h => h.startsWith("T"))
-        .map((h, i) => `${depthMap[i] || i * 4 + 2}"=${toF(row[h]).toFixed(1)}°F`)
+        .map((h, i) => {
+          const v = safeToF(row[h]);
+          return v !== null ? `${depthMap[i] || i * 4 + 2}"=${v.toFixed(1)}°F` : null;
+        })
+        .filter(Boolean)
         .join(", ");
+
       const moist = headers
         .filter(h => h.startsWith("A"))
-        .map((h, i) => `${depthMap[i] || i * 4 + 2}"=${parseFloat(row[h] || "0").toFixed(1)}%`)
+        .map((h, i) => {
+          const m = parseFloat(row[h]);
+          return !isNaN(m) ? `${depthMap[i] || i * 4 + 2}"=${m.toFixed(1)}%` : null;
+        })
+        .filter(Boolean)
         .join(", ");
+
       return `${dt} | Temp: ${temps} | Moist: ${moist}`;
     }).join("\n");
 
-    // ---- Feed full context to GPT ----
+    // ---- GPT Prompt ----
     const prompt = `
 You are Acre Insights' soil data analysis assistant.
 You have direct access to actual IrriMAX probe readings below.
 
-Each line has a date/time followed by temperature (°F) and moisture (%) at depths in inches.
-Use these readings to precisely answer questions about specific dates, times, depths, or trends.
+Each line includes a timestamp followed by temperature (°F) and moisture (%) at each depth.
+Use this dataset to answer questions about specific dates, times, depths, or patterns accurately.
+If a timestamp isn't exact, find the closest value in the dataset.
 
-Be concise, clear, and factual — reference real values from the dataset.
-If no data exists for an exact timestamp, find and report the closest reading.
-
-Here is the actual data (past ~180 days):
+Here is the data (past ~180 days):
 ${compactHistory}
 
 User message:
@@ -104,7 +112,7 @@ User message:
       input: prompt
     });
 
-    const reply = gptRes.output[0]?.content[0]?.text || "No response generated.";
+    const reply = gptRes.output?.[0]?.content?.[0]?.text || "No response generated.";
 
     return {
       statusCode: 200,
