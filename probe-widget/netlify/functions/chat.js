@@ -1,208 +1,155 @@
-// netlify/functions/chat.js
 const fetch = require("node-fetch");
 
-// ================================
-// CONFIGURATION
-// ================================
-const OPENAI_KEY = process.env.OPENAI_API_KEY;
-const PROBE_KEY = process.env.PROBE_API_KEY;
-const BASE_URL = process.env.PROBE_API_BASE || "https://www.irrimaxlive.com/api/";
-const LOGGER = "25x4gcityw";
-const MODEL = "gpt-4o-mini";
-
-// ================================
-// HELPERS
-// ================================
-function ok(obj) {
-  return {
-    statusCode: 200,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(obj),
-  };
-}
-function err(code, obj) {
-  return {
-    statusCode: code,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(obj),
-  };
-}
-function toIrrimaxDate(date) {
-  return date.toISOString().replace(/[-:T]/g, "").slice(0, 14);
-}
-
-// ================================
-// FETCH PROBE DATA (CSV → parsed)
-// ================================
-async function getProbeData({ start, end }) {
-  if (!PROBE_KEY) throw new Error("Missing PROBE_API_KEY");
-
-  // Auto 7-day window if not specified
-  if (!start && !end) {
-    const now = new Date();
-    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    start = toIrrimaxDate(weekAgo);
-    end = toIrrimaxDate(now);
-    console.log("[auto-range]", start, "to", end);
-  }
-
-  const url = `${BASE_URL}?cmd=getreadings&key=${PROBE_KEY}&name=${LOGGER}&from=${start}&to=${end}`;
-  console.log("[fetching]", url);
-
-  const res = await fetch(url);
-  const csv = await res.text();
-  if (!res.ok) throw new Error(`IrriMAX error: ${res.status}`);
-  if (!csv.includes("Date Time")) throw new Error("Invalid IrriMAX response");
-
-  const lines = csv.split("\n").filter((l) => l.trim());
+// ------------------------- HELPERS -------------------------
+function parseCSV(csv) {
+  const lines = csv.trim().split("\n");
   const headers = lines[0].split(",");
-  const dataRows = lines.slice(1).map((r) => r.split(","));
-
-  return { headers, dataRows };
-}
-
-// ================================
-// ANALYZE TRENDS + SUMMARIZE
-// ================================
-async function analyzeWithOpenAI(prompt, csvSummary) {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENAI_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [
-        { role: "system", content: "You are a soil data analyst who interprets IrriMAX probe data for farmers in simple language. Use Fahrenheit and inches. Round decimals sensibly." },
-        {
-          role: "user",
-          content: `${prompt}\n\nHere’s the data summary:\n${csvSummary}`,
-        },
-      ],
-    }),
+  const data = lines.slice(1).map(line => {
+    const parts = line.split(",");
+    const obj = {};
+    headers.forEach((h, i) => (obj[h.trim()] = parts[i] ? parts[i].trim() : ""));
+    return obj;
   });
-
-  const json = await res.json();
-  return json?.choices?.[0]?.message?.content || "No response.";
+  return { headers, data };
 }
 
-// ================================
-// MAIN HANDLER
-// ================================
+function toF(c) {
+  return (parseFloat(c) * 9) / 5 + 32;
+}
+
+// ------------------------- MAIN HANDLER -------------------------
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST")
-    return err(405, { error: "Method not allowed" });
-
-  let body = {};
   try {
-    body = JSON.parse(event.body || "{}");
-  } catch (e) {
-    return err(400, { error: "Invalid JSON" });
-  }
+    const { message } = JSON.parse(event.body || "{}");
+    const msg = message?.toLowerCase() || "";
+    console.log("[User message]:", msg);
 
-  const msg = body.message?.toLowerCase() || "";
-  console.log("[user]", msg);
+    const apiKey = process.env.PROBE_API_KEY;
+    const loggerId = "25x4gcityw";
+    const url = `https://www.irrimaxlive.com/api/?cmd=getgraphvalues&key=${apiKey}&name=${loggerId}`;
 
-  try {
-    // Check if user gave a timeframe
-    if (/trend|since|week|month|year|past/i.test(msg)) {
-      const { headers, dataRows } = await getProbeData({});
+    const r = await fetch(url);
+    const csvText = await r.text();
 
-      const tempCols = headers
-        .map((h, i) => (h.startsWith("T") ? i : -1))
-        .filter((i) => i >= 0);
+    if (!csvText.includes("Date Time")) {
+      throw new Error("Invalid CSV from IrriMAX API");
+    }
 
-      if (!tempCols.length) throw new Error("No temperature columns found.");
+    const { headers, data } = parseCSV(csvText);
+    const latest = data[data.length - 1];
 
-      const latest = dataRows[dataRows.length - 1];
-      const temps = tempCols.map((i) => ({
-        depth: headers[i].replace("T", "").replace(/\(.*\)/, ""),
-        val: parseFloat(latest[i] || 0),
+    // --- Depth mapping (cm -> inches) ---
+    const depthMap = [2, 6, 10, 14, 18, 22, 26, 30, 33, 37, 41, 45];
+
+    // Extract sensor values
+    const temps = headers
+      .filter(h => h.startsWith("T"))
+      .map((h, i) => ({
+        depth: depthMap[i] || (i * 4 + 2),
+        val: parseFloat(latest[h] || "0")
       }));
 
-      const summary = temps
-        .map((t) => `${t.depth}" = ${t.val.toFixed(1)}°C`)
-        .join(", ");
+    const moistures = headers
+      .filter(h => h.startsWith("A"))
+      .map((h, i) => ({
+        depth: depthMap[i] || (i * 4 + 2),
+        val: parseFloat(latest[h] || "0")
+      }));
 
-      const trendPrompt = `Analyze soil temperature and moisture changes across depths using these readings. If the user mentioned a timeframe, use it. Otherwise, assume a 7-day window. Emphasize any unusual changes, peaks, or dips.\n\n${summary}`;
-      const analysis = await analyzeWithOpenAI(trendPrompt, summary);
+    // --- Detect focus depth ---
+    const depthMatch = msg.match(/(\d+)\s*(?:in|inch|inches|")/i);
+    let focusDepth = depthMatch ? parseInt(depthMatch[1]) : null;
+    console.log("[Focus Depth]:", focusDepth);
 
-      return ok({ response: analysis });
+    // Filter data if user asked for one depth
+    let filteredTemps = temps;
+    let filteredMoistures = moistures;
+
+    if (focusDepth) {
+      filteredTemps = temps.filter(t => t.depth === focusDepth);
+      filteredMoistures = moistures.filter(m => m.depth === focusDepth);
     }
 
-    // If asking for basic reading
-    if (/temp|moisture|sensor/i.test(msg)) {
-      const { headers, dataRows } = await getProbeData({});
-      const latest = dataRows[dataRows.length - 1];
-      const date = new Date(latest[0]);
-      const formattedDate = date.toLocaleString("en-US", {
-        month: "long",
-        day: "numeric",
-        year: "numeric",
-        hour: "numeric",
-        minute: "2-digit",
+    // --- Determine if asking about temperature or moisture ---
+    const wantsTemp = msg.includes("temp");
+    const wantsMoisture = msg.includes("moist");
+
+    // Format date
+    const date = new Date(latest["Date Time"]);
+    const formattedDate = date.toLocaleString("en-US", {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true
+    });
+
+    // --- Response Text ---
+    let response = "";
+
+    if (focusDepth) {
+      if (wantsTemp && filteredTemps.length) {
+        const t = filteredTemps[0];
+        response = `**Soil Conditions — ${formattedDate}**\n• ${t.depth}" — ${toF(t.val).toFixed(0)}°F`;
+      } else if (wantsMoisture && filteredMoistures.length) {
+        const m = filteredMoistures[0];
+        response = `**Soil Conditions — ${formattedDate}**\n• ${m.depth}" — ${m.val.toFixed(1)}% moisture`;
+      } else if (filteredTemps.length && filteredMoistures.length) {
+        const t = filteredTemps[0];
+        const m = filteredMoistures[0];
+        response = `**Soil Conditions — ${formattedDate}**\n• ${t.depth}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
+      }
+    } else {
+      // All depths summary
+      const lines = depthMap.map((d, i) => {
+        const t = temps[i];
+        const m = moistures[i];
+        if (!t || !m) return "";
+        return `• ${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
+      });
+      response = `**Soil Conditions — ${formattedDate}**\n${lines.join("\n")}`;
+    }
+
+    // --- If trend or analysis requested, ask GPT ---
+    if (msg.includes("trend") || msg.includes("change") || msg.includes("over the past")) {
+      const openai = require("openai");
+      const client = new openai.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const miniModel = "gpt-4o-mini";
+
+      const trendPrompt = `
+You are Acre Insights' probe analysis assistant. 
+The user asked: "${message}"
+
+Focus on ${focusDepth ? `${focusDepth}-inch sensor` : "all sensors"}.
+
+Here are the most recent readings (in °F and % moisture):
+${depthMap.map((d, i) => {
+  const t = temps[i], m = moistures[i];
+  return `${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
+}).join("\n")}
+
+Analyze trends in moisture and/or temperature based on context.
+`;
+
+      const trendRes = await client.responses.create({
+        model: miniModel,
+        input: trendPrompt
       });
 
-      const temps = headers
-        .map((h, i) =>
-          h.startsWith("T")
-            ? {
-                depth: Math.round(parseFloat(h.match(/\((\d+)/)?.[1] || 0) / 2.54),
-                val: parseFloat(latest[i] || 0),
-              }
-            : null
-        )
-        .filter(Boolean);
-
-      const moistures = headers
-        .map((h, i) =>
-          h.startsWith("A")
-            ? {
-                depth: Math.round(parseFloat(h.match(/\((\d+)/)?.[1] || 0) / 2.54),
-                val: parseFloat(latest[i] || 0),
-              }
-            : null
-        )
-        .filter(Boolean);
-
-     let lines = "";
-
-if (msg.includes("moisture") && !msg.includes("temp")) {
-  // --- Only moisture ---
-  lines = moistures
-    .map((m) => `• ${m.depth}" — ${m.val.toFixed(1)}% moisture`)
-    .join("\n");
-
-} else if (msg.includes("temp") || msg.includes("temperature")) {
-  // --- Only temperature ---
-  lines = temps
-    .map((t) => `• ${t.depth}" — ${Math.round(t.val * 9 / 5 + 32)}°F`)
-    .join("\n");
-
-} else {
-  // --- Both ---
-  lines = temps
-    .map((t, i) => {
-      const m = moistures[i];
-      return `• ${t.depth}" — ${Math.round(t.val * 9 / 5 + 32)}°F, ${m?.val.toFixed(1)}% moisture`;
-    })
-    .join("\n");
-}
-
-const summary = `**Soil Conditions — ${formattedDate}**\n${lines}`;
-
-
-      return ok({ response: summary });
+      const trendText = trendRes.output[0]?.content[0]?.text || "Trend analysis unavailable.";
+      response = trendText;
     }
 
-    // No timeframe specified
-    return ok({
-      response:
-        "Sure — over what time period would you like me to check the trend?",
-    });
-  } catch (e) {
-    console.error("Chat function error:", e);
-    return err(500, { error: "Chat function error", detail: e.message });
+    return {
+      statusCode: 200,
+      body: JSON.stringify({ response })
+    };
+  } catch (err) {
+    console.error("Chat function error:", err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: err.message })
+    };
   }
 };
