@@ -5,7 +5,7 @@ const fetch = require("node-fetch");
 // ----------------------------
 const OPENAI_KEY = process.env.OPENAI_API_KEY;
 const IRRIMAX_KEY = process.env.PROBE_API_KEY;
-const IRRIMAX_BASE = process.env.PROBE_API_BASE || "https://www.irrimaxlive.com/api/";
+const IRRIMAX_BASE = process.env.PROBE_API_BASE || "https://api.irrimaxlive.com/av1/";
 const LOGGER = "25x4gcityw"; // replace with your actual logger ID
 const MODEL = "gpt-4o-mini";
 
