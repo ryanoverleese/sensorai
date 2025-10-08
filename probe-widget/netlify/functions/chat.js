@@ -118,7 +118,7 @@ User message:
 "${message}"
 `;
 
-    // ---- STREAMING GPT RESPONSE ----
+    // ---- GPT STREAM WITH SAFE COLLECTION ----
     const stream = await client.responses.stream({
       model: "gpt-4o-mini",
       input: prompt,
@@ -129,9 +129,13 @@ User message:
       if (ev.type === "response.output_text.delta") full += ev.delta;
     }
 
+    // Close the stream cleanly before returning
+    await stream.finalEvent;
+
     return {
       statusCode: 200,
-      body: JSON.stringify({ response: full }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response: full.trim() }),
     };
 
   } catch (err) {
