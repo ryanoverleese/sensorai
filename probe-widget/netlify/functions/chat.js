@@ -61,7 +61,7 @@ exports.handler = async (event) => {
 
     if (isTemp || isMoisture || wantsBoth) {
       const depthCm = parseDepth(msg);
-      const result = await getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth);
+      const result = await getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg);
       return ok({ threadId: null, response: result, runStatus: "completed" });
     }
 
@@ -77,7 +77,7 @@ exports.handler = async (event) => {
 // ----------------------------
 // SOIL DATA PARSER
 // ----------------------------
-async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth) {
+async function getSoilProfile(depthCm, isTemp, isMoisture, wantsBoth, msg) {
   const url = `${IRRIMAX_BASE}?cmd=getreadings&key=${IRRIMAX_KEY}&name=${LOGGER}`;
   const r = await fetch(url);
   const csv = await r.text();
