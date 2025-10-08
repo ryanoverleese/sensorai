@@ -1,4 +1,5 @@
 const fetch = require("node-fetch");
+const { OpenAI } = require("openai");
 
 // ------------------------- HELPERS -------------------------
 function parseCSV(csv) {
@@ -17,6 +18,18 @@ function toF(c) {
   return (parseFloat(c) * 9) / 5 + 32;
 }
 
+function fmt(d) {
+  const pad = n => String(n).padStart(2, "0");
+  return (
+    d.getFullYear().toString() +
+    pad(d.getMonth() + 1) +
+    pad(d.getDate()) +
+    pad(d.getHours()) +
+    pad(d.getMinutes()) +
+    pad(d.getSeconds())
+  );
+}
+
 // ------------------------- MAIN HANDLER -------------------------
 exports.handler = async (event) => {
   try {
@@ -26,8 +39,22 @@ exports.handler = async (event) => {
 
     const apiKey = process.env.PROBE_API_KEY;
     const loggerId = "25x4gcityw";
-  const url = `https://www.irrimaxlive.com/api/?cmd=getreadings&key=${apiKey}&name=${loggerId}`;
 
+    // --- Determine date range dynamically ---
+    let daysBack = 7; // default
+    const now = new Date();
+
+    const matchDays = msg.match(/past\s+(\d+)\s+day/i);
+    if (matchDays) daysBack = parseInt(matchDays[1]);
+    if (msg.includes("past week")) daysBack = 7;
+    if (msg.includes("past month")) daysBack = 30;
+
+    const startDate = new Date(now.getTime() - daysBack * 24 * 60 * 60 * 1000);
+    const from = fmt(startDate);
+    const to = fmt(now);
+
+    const url = `https://www.irrimaxlive.com/api/?cmd=getreadings&key=${apiKey}&name=${loggerId}&from=${from}&to=${to}`;
+    console.log("[IrriMAX URL]:", url);
 
     const r = await fetch(url);
     const csvText = await r.text();
@@ -59,23 +86,14 @@ exports.handler = async (event) => {
 
     // --- Detect focus depth ---
     const depthMatch = msg.match(/(\d+)\s*(?:in|inch|inches|")/i);
-    let focusDepth = depthMatch ? parseInt(depthMatch[1]) : null;
+    const focusDepth = depthMatch ? parseInt(depthMatch[1]) : null;
     console.log("[Focus Depth]:", focusDepth);
-
-    // Filter data if user asked for one depth
-    let filteredTemps = temps;
-    let filteredMoistures = moistures;
-
-    if (focusDepth) {
-      filteredTemps = temps.filter(t => t.depth === focusDepth);
-      filteredMoistures = moistures.filter(m => m.depth === focusDepth);
-    }
 
     // --- Determine if asking about temperature or moisture ---
     const wantsTemp = msg.includes("temp");
     const wantsMoisture = msg.includes("moist");
 
-    // Format date
+    // --- Format date ---
     const date = new Date(latest["Date Time"]);
     const formattedDate = date.toLocaleString("en-US", {
       month: "long",
@@ -86,36 +104,35 @@ exports.handler = async (event) => {
       hour12: true
     });
 
-    // --- Response Text ---
+    // --- Response builder ---
     let response = "";
 
     if (focusDepth) {
-      if (wantsTemp && filteredTemps.length) {
-        const t = filteredTemps[0];
-        response = `**Soil Conditions — ${formattedDate}**\n• ${t.depth}" — ${toF(t.val).toFixed(0)}°F`;
-      } else if (wantsMoisture && filteredMoistures.length) {
-        const m = filteredMoistures[0];
-        response = `**Soil Conditions — ${formattedDate}**\n• ${m.depth}" — ${m.val.toFixed(1)}% moisture`;
-      } else if (filteredTemps.length && filteredMoistures.length) {
-        const t = filteredTemps[0];
-        const m = filteredMoistures[0];
-        response = `**Soil Conditions — ${formattedDate}**\n• ${t.depth}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
+      const t = temps.find(x => x.depth === focusDepth);
+      const m = moistures.find(x => x.depth === focusDepth);
+
+      if (wantsTemp && t) {
+        response = `**Soil Temperature — ${formattedDate}**\n• ${focusDepth}" — ${toF(t.val).toFixed(0)}°F`;
+      } else if (wantsMoisture && m) {
+        response = `**Soil Moisture — ${formattedDate}**\n• ${focusDepth}" — ${m.val.toFixed(1)}%`;
+      } else if (t && m) {
+        response = `**Soil Conditions — ${formattedDate}**\n• ${focusDepth}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
       }
     } else {
-      // All depths summary
+      // All depths
       const lines = depthMap.map((d, i) => {
         const t = temps[i];
         const m = moistures[i];
-        if (!t || !m) return "";
+        if (wantsTemp && t) return `• ${d}" — ${toF(t.val).toFixed(0)}°F`;
+        if (wantsMoisture && m) return `• ${d}" — ${m.val.toFixed(1)}%`;
         return `• ${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
       });
-      response = `**Soil Conditions — ${formattedDate}**\n${lines.join("\n")}`;
+      response = `**Soil ${wantsTemp ? "Temperature" : wantsMoisture ? "Moisture" : "Conditions"} — ${formattedDate}**\n${lines.join("\n")}`;
     }
 
-    // --- If trend or analysis requested, ask GPT ---
+    // --- Trend or analysis (via GPT) ---
     if (msg.includes("trend") || msg.includes("change") || msg.includes("over the past")) {
-      const openai = require("openai");
-      const client = new openai.OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       const miniModel = "gpt-4o-mini";
 
       const trendPrompt = `
@@ -124,13 +141,13 @@ The user asked: "${message}"
 
 Focus on ${focusDepth ? `${focusDepth}-inch sensor` : "all sensors"}.
 
-Here are the most recent readings (in °F and % moisture):
+Here are readings from the past ${daysBack} days (°F and % moisture):
 ${depthMap.map((d, i) => {
   const t = temps[i], m = moistures[i];
-  return `${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}% moisture`;
+  return `${d}" — ${toF(t.val).toFixed(0)}°F, ${m.val.toFixed(1)}%`;
 }).join("\n")}
 
-Analyze trends in moisture and/or temperature based on context.
+Analyze trends relevant to the user's query. Respond clearly and concisely.
 `;
 
       const trendRes = await client.responses.create({
