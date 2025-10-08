@@ -60,7 +60,6 @@
     }
     async function send() {
       const text = input.value.trim();
-      alert("debug - test is: " + text + " | input is: " + input);
       if (!text) return;
       add('user', text);
       input.value = '';
