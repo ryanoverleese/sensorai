@@ -1,6 +1,9 @@
 {
   "name": "probe-widget",
   "version": "1.0.0",
+  "scripts": {
+    "test": "node check-readiness.mjs"
+  },
   "dependencies": {
     "node-fetch": "^2.6.7",
     "openai": "^4.0.0"
